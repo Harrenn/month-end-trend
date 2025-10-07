@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <h2>Live Trend</h2>
+            </div>
+            <div class="card-body">
+                <form id="forecast-form">
+                    <div class="mb-3">
+                        <label for="forecast_month" class="form-label">Trend month (YYYY-MM)</label>
+                        <input type="text" class="form-control" id="forecast_month" placeholder="2025-08">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="day_to_forecast" class="form-label">Day of month</label>
+                        <input type="number" class="form-control" id="day_to_forecast" min="1" max="31">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="current_mtd" class="form-label">Current MTD</label>
+                        <input type="number" class="form-control" id="current_mtd" step="0.01" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="n_months_to_use" class="form-label">History window (months)</label>
+                        <input type="number" class="form-control" id="n_months_to_use" min="1" value="6">
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Generate Trend</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div id="result-container" style="display: none;">
+            <div class="card result-card">
+                <div class="card-header">
+                    <h3>Trend</h3>
+                </div>
+                <div class="card-body">
+                    <h4>Predicted total: <span id="predicted-total"></span></h4>
+                    <p>Avg margin of error: <span id="margin-of-error"></span></p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="error-container" style="display: none;">
+            <div class="card error-card">
+                <div class="card-header">
+                    <h3>Error</h3>
+                </div>
+                <div class="card-body">
+                    <p id="error-message"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+$(document).ready(function() {
+    // Set default values based on the reference script
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    const defaultMonth = yesterday.toISOString().slice(0, 7); // YYYY-MM format
+    $('#forecast_month').val(defaultMonth);
+    
+    // Set default day based on yesterday's date if it's the same month
+    if (yesterday.toISOString().slice(0, 7) === defaultMonth) {
+        $('#day_to_forecast').val(yesterday.getDate());
+    }
+    
+    $('#forecast-form').on('submit', function(e) {
+        e.preventDefault();
+        
+        // Get form values
+        let forecast_month = $('#forecast_month').val();
+        let day_to_forecast = $('#day_to_forecast').val();
+        const current_mtd = $('#current_mtd').val();
+        const n_months_to_use = $('#n_months_to_use').val() || 6;
+        
+        // Use defaults if values are empty (like in the reference script)
+        if (!forecast_month) {
+            forecast_month = defaultMonth;
+        }
+        
+        if (!day_to_forecast && yesterday.toISOString().slice(0, 7) === forecast_month) {
+            day_to_forecast = yesterday.getDate();
+        }
+        
+        // Validate required fields
+        if (!current_mtd) {
+            alert('Current MTD Collection is required');
+            return;
+        }
+        
+        // Hide previous results
+        $('#result-container').hide();
+        $('#error-container').hide();
+        
+        console.log('Sending request with:', {
+            forecast_month: forecast_month,
+            day_to_forecast: day_to_forecast,
+            current_mtd: current_mtd,
+            n_months_to_use: n_months_to_use
+        });
+        
+        // Send request to API
+        $.ajax({
+            url: '/api/live_forecast',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                forecast_month: forecast_month,
+                day_to_forecast: day_to_forecast,
+                current_mtd: current_mtd,
+                n_months_to_use: n_months_to_use
+            }),
+            success: function(data) {
+                console.log('Success response:', data);
+                // Display results
+                $('#predicted-total').text(parseFloat(data.forecast).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+                $('#margin-of-error').text((parseFloat(data.avg_margin_of_error) * 100).toFixed(2) + '%');
+                $('#result-container').show();
+            },
+            error: function(xhr) {
+                console.log('Error response:', xhr);
+                // Display error
+                try {
+                    const errorData = JSON.parse(xhr.responseText);
+                    $('#error-message').text(errorData.error);
+                } catch (e) {
+                    $('#error-message').text('An unknown error occurred');
+                }
+                $('#error-container').show();
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Month End Trend Calculator</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <div class="header text-center mt-4 mb-4">
+            <h1>Month End Trend Calculator</h1>
+        </div>
+
+        <ul class="nav nav-tabs mb-4">
+            <li class="nav-item">
+                <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}" href="/">Home</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if request.endpoint == 'live_forecast' %}active{% endif %}" href="/live_forecast">Live Trend</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if request.endpoint == 'backtest' %}active{% endif %}" href="/backtest">Backtest</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link {% if request.endpoint == 'upload' %}active{% endif %}" href="/upload">Upload Data</a>
+            </li>
+        </ul>
+
+        {% block content %}{% endblock %}
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

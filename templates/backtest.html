@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <h2>Backtest</h2>
+            </div>
+            <div class="card-body">
+                <form id="backtest-form">
+                    <div class="mb-3">
+                        <label for="test_period_months" class="form-label">Backtest window (months)</label>
+                        <input type="number" class="form-control" id="test_period_months" min="1" value="6" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="n_for_rmla_model" class="form-label">Training window (months)</label>
+                        <input type="number" class="form-control" id="n_for_rmla_model" min="1" value="6" required>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Run Backtest</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div id="result-container" style="display: none;">
+            <div class="card result-card">
+                <div class="card-header">
+                    <h3>Results</h3>
+                </div>
+                <div class="card-body">
+                    <h4>Overall Avg Error</h4>
+                    <p>Legacy RMLA: <span id="overall-accuracy"></span></p>
+                    
+                    <h4>Monthly Error</h4>
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Month</th>
+                                <th>Average Error</th>
+                            </tr>
+                        </thead>
+                        <tbody id="monthly-results">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <div id="error-container" style="display: none;">
+            <div class="card error-card">
+                <div class="card-header">
+                    <h3>Error</h3>
+                </div>
+                <div class="card-body">
+                    <p id="error-message"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+$(document).ready(function() {
+    $('#backtest-form').on('submit', function(e) {
+        e.preventDefault();
+        
+        // Get form values
+        const test_period_months = $('#test_period_months').val();
+        const n_for_rmla_model = $('#n_for_rmla_model').val();
+        
+        // Hide previous results
+        $('#result-container').hide();
+        $('#error-container').hide();
+        
+        // Send request to API
+        $.ajax({
+            url: '/api/backtest',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                test_period_months: test_period_months,
+                n_for_rmla_model: n_for_rmla_model
+            }),
+            success: function(data) {
+                // Display results
+                $('#overall-accuracy').text((data.overall_accuracy * 100).toFixed(2) + '%');
+                
+                // Clear and populate monthly results
+                $('#monthly-results').empty();
+                data.monthly_results.forEach(function(result) {
+                    $('#monthly-results').append(
+                        '<tr><td>' + result.month + '</td><td>' + (result.error * 100).toFixed(2) + '%</td></tr>'
+                    );
+                });
+                
+                $('#result-container').show();
+            },
+            error: function(xhr) {
+                // Display error
+                const errorData = JSON.parse(xhr.responseText);
+                $('#error-message').text(errorData.error);
+                $('#error-container').show();
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

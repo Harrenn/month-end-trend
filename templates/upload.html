@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <h2>Upload Data</h2>
+            </div>
+            <div class="card-body">
+                <form id="upload-form" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="file" class="form-label">CSV file</label>
+                        <input type="file" class="form-control" id="file" name="file" accept=".csv" required>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Upload File</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div id="result-container" style="display: none;">
+            <div class="card">
+                <div class="card-body">
+                    <p id="success-message"></p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="error-container" style="display: none;">
+            <div class="card">
+                <div class="card-body">
+                    <p id="error-message"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+$(document).ready(function() {
+    $('#upload-form').on('submit', function(e) {
+        e.preventDefault();
+        
+        var formData = new FormData();
+        var fileInput = $('#file')[0];
+        if (fileInput.files.length > 0) {
+            formData.append('file', fileInput.files[0]);
+        } else {
+            alert('Please select a file to upload');
+            return;
+        }
+        
+        $('#result-container').hide();
+        $('#error-container').hide();
+        
+        $.ajax({
+            url: '/api/upload',
+            method: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function(data) {
+                $('#success-message').text(data.message);
+                $('#result-container').show();
+                $('#upload-form')[0].reset();
+            },
+            error: function(xhr) {
+                try {
+                    const errorData = JSON.parse(xhr.responseText);
+                    $('#error-message').text(errorData.error);
+                } catch (e) {
+                    $('#error-message').text('An unknown error occurred');
+                }
+                $('#error-container').show();
+            }
+        });
+    });
+});
+</script>
+{% endblock %}
