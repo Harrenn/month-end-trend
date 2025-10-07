@@ -5,9 +5,18 @@
     <div class="col-md-12">
         <div class="card">
             <div class="card-header">
-                <h2>Upload Data</h2>
+                <h2>Upload Data {% if selected_trend_label %}<small class="text-muted">({{ selected_trend_label }})</small>{% endif %}</h2>
             </div>
             <div class="card-body">
+                <p class="text-muted">Provide a CSV with columns <code>date</code> and <code>{{ (selected_trend_metric_label or 'metric') | lower }}</code>.</p>
+                {% if selected_trend_key == 'releases' %}
+                <p class="text-muted">Optional column: <code>loan_type</code> to build per-loan-type trends. Duplicate dates are summed automatically.</p>
+                {% endif %}
+                {% if selected_trend_latest_period %}
+                <div class="alert alert-info py-2">Latest data month: <strong>{{ selected_trend_latest_period }}</strong>. Upload a newer file to keep the trend up to date.</div>
+                {% else %}
+                <div class="alert alert-warning py-2">No data found for this trend yet. Upload a CSV to get started.</div>
+                {% endif %}
                 <form id="upload-form" enctype="multipart/form-data">
                     <div class="mb-3">
                         <label for="file" class="form-label">CSV file</label>
