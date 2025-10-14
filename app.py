@@ -1,4 +1,7 @@
 import os
+import shutil
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,11 +15,26 @@ from flask import (
     url_for,
 )
 
-# Create Flask app
-app = Flask(__name__)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-me')
+if getattr(sys, 'frozen', False):
+    RESOURCE_ROOT = Path(sys._MEIPASS)
+    WORKSPACE_ROOT = Path(sys.executable).resolve().parent
+else:
+    RESOURCE_ROOT = Path(__file__).resolve().parent
+    WORKSPACE_ROOT = RESOURCE_ROOT
 
-DATA_ROOT = os.path.join(os.path.dirname(__file__), 'data')
+TEMPLATE_ROOT = RESOURCE_ROOT / 'templates'
+STATIC_ROOT = RESOURCE_ROOT / 'static'
+DATA_ROOT = WORKSPACE_ROOT / 'data'
+DEFAULT_DATA_ROOT = RESOURCE_ROOT / 'data'
+DATA_ROOT.mkdir(parents=True, exist_ok=True)
+
+flask_kwargs = {'template_folder': str(TEMPLATE_ROOT)}
+if STATIC_ROOT.exists():
+    flask_kwargs['static_folder'] = str(STATIC_ROOT)
+
+# Create Flask app
+app = Flask(__name__, **flask_kwargs)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-me')
 
 TREND_CONFIG = {
     'collection': {
@@ -38,10 +56,15 @@ TREND_CONFIG = {
 trend_store = {}
 
 for trend_key, config in TREND_CONFIG.items():
-    data_dir = os.path.join(DATA_ROOT, trend_key)
-    os.makedirs(data_dir, exist_ok=True)
-    config['data_dir'] = data_dir
-    config['file_path'] = os.path.join(data_dir, config['file_name'])
+    data_dir = DATA_ROOT / trend_key
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config['data_dir'] = str(data_dir)
+    file_path = data_dir / config['file_name']
+    if DEFAULT_DATA_ROOT.exists():
+        default_file = DEFAULT_DATA_ROOT / trend_key / config['file_name']
+        if default_file.exists() and not file_path.exists():
+            shutil.copy2(default_file, file_path)
+    config['file_path'] = str(file_path)
     trend_store[trend_key] = {
         'segments': {},
         'segment_labels': {},
