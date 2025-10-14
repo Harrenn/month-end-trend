@@ -8,12 +8,10 @@
                 <h2>Select a Trend</h2>
             </div>
             <div class="card-body">
-                <p class="mb-4">Choose which data stream you would like to analyze. You can switch at any time.</p>
-
                 <div class="row g-3">
                     {% for trend_key, config in trend_options.items() %}
                     <div class="col-md-6">
-                        <div class="card h-100 {% if selected_trend_key == trend_key %}border-primary{% endif %}">
+                        <div class="card h-100 {% if selected_trend_key == trend_key %}border border-2 border-success-subtle{% else %}border-0{% endif %}">
                             <div class="card-body d-flex flex-column">
                                 <h3 class="card-title">{{ config.label }}</h3>
                                 <p class="card-text">CSV columns required: <code>date</code>, <code>{{ config.value_column }}</code></p>

@@ -49,7 +49,7 @@ for trend_key, config in TREND_CONFIG.items():
     }
 
 # =============================================================================
-# === Final Forecasting Showdown: Legacy RMLA Only ===
+# === Final Trend Showdown: Legacy RMLA Only ===
 # Web Implementation
 # =============================================================================
 
@@ -292,7 +292,7 @@ def select_trend():
     session['selected_trend'] = trend_key
     session['selected_segment'] = '__all__'
     next_page = request.form.get('next')
-    return redirect(next_page or url_for('live_forecast'))
+    return redirect(next_page or url_for('live_trend'))
 
 
 @app.route('/clear_trend')
@@ -301,11 +301,11 @@ def clear_trend():
     session.pop('selected_segment', None)
     return redirect(url_for('index'))
 
-@app.route('/live_forecast')
-def live_forecast():
+@app.route('/live_trend')
+def live_trend():
     if get_selected_trend_key() is None:
         return redirect(url_for('index'))
-    return render_template('live_forecast.html')
+    return render_template('live_trend.html')
 
 @app.route('/backtest')
 def backtest():
@@ -333,16 +333,16 @@ def select_segment():
 
     session['selected_segment'] = segment
 
-    next_page = request.form.get('next') or request.headers.get('Referer') or url_for('live_forecast')
+    next_page = request.form.get('next') or request.headers.get('Referer') or url_for('live_trend')
     if not next_page or not str(next_page).startswith('/'):
-        next_page = url_for('live_forecast')
+        next_page = url_for('live_trend')
     return redirect(next_page)
 
-@app.route('/api/live_forecast', methods=['POST'])
-def api_live_forecast():
+@app.route('/api/live_trend', methods=['POST'])
+def api_live_trend():
     trend_key = get_selected_trend_key()
     if trend_key is None:
-        return jsonify({'error': 'Select a trend before forecasting.'}), 400
+        return jsonify({'error': 'Select a trend before generating a live trend.'}), 400
 
     context = get_trend_context(trend_key)
     if context.get('error'):
@@ -363,79 +363,74 @@ def api_live_forecast():
         data = request.get_json()
         
         # Get input values
-        forecast_month_str = data.get('forecast_month')
-        day_to_forecast = data.get('day_to_forecast')
+        trend_month_str = data.get('trend_month')
+        day_to_trend = data.get('day_to_trend')
         current_mtd = float(data.get('current_mtd'))
         n_months_to_use = int(data.get('n_months_to_use', 6))
         
-        # Process forecast month
-        forecast_month = pd.Period(forecast_month_str)
+        if not trend_month_str:
+            return jsonify({'error': 'Trend month is required.'}), 400
+
+        # Process trend month
+        trend_month = pd.Period(trend_month_str)
         
         # Get historical data
-        historical_data = get_historical_data(legacy_df, forecast_month, n_months_to_use)
+        historical_data = get_historical_data(legacy_df, trend_month, n_months_to_use)
         if historical_data is None:
-            return jsonify({'error': 'Cannot forecast: Not enough historical data.'}), 400
+            return jsonify({'error': 'Cannot generate trend: Not enough historical data.'}), 400
         
-        # Convert day_to_forecast to int if it's not None
-        if day_to_forecast is not None:
-            day_to_forecast = int(day_to_forecast)
+        # Convert day_to_trend to int if it's not None
+        if day_to_trend is not None:
+            day_to_trend = int(day_to_trend)
         else:
-            return jsonify({'error': 'Day to forecast is required'}), 400
+            return jsonify({'error': 'Day to trend is required'}), 400
         
-        # Main Forecast
+        # Main Trend Estimate
         legacy_curve = historical_data.groupby('day_of_month')['percent_complete'].mean().sort_index()
-        legacy_attainment = legacy_curve.get(day_to_forecast, 0)
-        forecast = current_mtd / legacy_attainment if legacy_attainment > 0 else 0
+        legacy_attainment = legacy_curve.get(day_to_trend, 0)
+        trend_total = current_mtd / legacy_attainment if legacy_attainment > 0 else 0
 
-        history_rows = historical_data[historical_data['day_of_month'] == day_to_forecast]
         history_details = []
-        for _, hist_row in history_rows.iterrows():
-            hist_month = hist_row['year_month']
-            implied_forecast = (
-                hist_row['mtd'] / hist_row['percent_complete']
-                if hist_row['percent_complete'] > 0 else 0
-            )
-            actual_total = float(monthly_totals.get(hist_month, 0))
-            margin_of_error = (
-                abs(implied_forecast - actual_total) / actual_total
-                if actual_total > 0 else 0
-            )
-            history_details.append({
-                'source_month': str(hist_month),
-                'percent_complete': float(hist_row['percent_complete']),
-                'mtd': float(hist_row['mtd']),
-                'actual_total': actual_total,
-                'implied_forecast': float(implied_forecast),
-                'margin_of_error': float(margin_of_error),
-            })
-
-        # Margin of Error Calculation
         errors = []
-        for hist_month in historical_data['year_month'].unique():
-            temp_hist_data = get_historical_data(legacy_df, hist_month, n_months_to_use)
-            if temp_hist_data is None:
-                continue
-            
-            temp_curve = temp_hist_data.groupby('day_of_month')['percent_complete'].mean()
-            hist_attainment = temp_curve.get(day_to_forecast, 0)
-            
+        historical_months = historical_data['year_month'].unique()
+        for hist_month in historical_months:
             hist_month_day_data = legacy_df[
-                (legacy_df['year_month'] == hist_month) & (legacy_df['day_of_month'] == day_to_forecast)
+                (legacy_df['year_month'] == hist_month) & (legacy_df['day_of_month'] == day_to_trend)
             ]
             if hist_month_day_data.empty:
                 continue
 
-            hist_mtd = hist_month_day_data['mtd'].iloc[0]
-            hist_actual_total = monthly_totals[hist_month]
-            
-            hist_forecast = hist_mtd / hist_attainment if hist_attainment > 0 else 0
-            error = abs(hist_forecast - hist_actual_total) / hist_actual_total if hist_actual_total > 0 else 0
-            errors.append(error)
-        
+            hist_mtd = float(hist_month_day_data['mtd'].iloc[0])
+            hist_percent_complete = float(hist_month_day_data['percent_complete'].iloc[0])
+            hist_actual_total = float(monthly_totals.get(hist_month, 0) or 0)
+
+            hist_trend_total = 0.0
+            margin_value = None
+
+            temp_hist_data = get_historical_data(legacy_df, hist_month, n_months_to_use)
+            hist_attainment = 0.0
+            if temp_hist_data is not None and not temp_hist_data.empty:
+                temp_curve = temp_hist_data.groupby('day_of_month')['percent_complete'].mean()
+                hist_attainment = float(temp_curve.get(day_to_trend, 0) or 0)
+                if hist_attainment > 0:
+                    hist_trend_total = hist_mtd / hist_attainment
+                    if hist_actual_total > 0:
+                        margin_value = abs(hist_trend_total - hist_actual_total) / hist_actual_total
+                        errors.append(margin_value)
+
+            history_details.append({
+                'source_month': str(hist_month),
+                'percent_complete': hist_percent_complete,
+                'mtd': hist_mtd,
+                'actual_total': hist_actual_total,
+                'implied_trend': float(hist_trend_total),
+                'margin_of_error': float(margin_value) if margin_value is not None else None,
+            })
+
         avg_margin_of_error = np.mean(errors) if errors else 0
 
         return jsonify({
-            'forecast': round(forecast, 2),
+            'trend_total': round(trend_total, 2),
             'avg_margin_of_error': avg_margin_of_error,
             'avg_percent_complete': legacy_attainment,
             'history': history_details,
@@ -488,60 +483,73 @@ def api_backtest():
             for _, day_row in month_data.iterrows():
                 day, mtd_actual = day_row['day_of_month'], day_row['mtd']
                 pct_legacy = legacy_curve.get(day, 0)
-                fc_legacy = mtd_actual / pct_legacy if pct_legacy > 0 else 0
+                trend_estimate_legacy = mtd_actual / pct_legacy if pct_legacy > 0 else 0
 
                 history_rows = historical_data[historical_data['day_of_month'] == day]
                 history_details = []
+                history_errors = []
                 for _, hist_row in history_rows.iterrows():
                     hist_month = hist_row['year_month']
-                    implied_forecast = (
-                        hist_row['mtd'] / hist_row['percent_complete']
-                        if hist_row['percent_complete'] > 0 else 0
-                    )
-                    actual_total = float(monthly_totals.get(hist_month, 0))
-                    margin_of_error = (
-                        abs(implied_forecast - actual_total) / actual_total
-                        if actual_total > 0 else 0
-                    )
+                    hist_mtd = float(hist_row['mtd'])
+                    hist_percent_complete = float(hist_row['percent_complete'])
+                    hist_actual_total = float(monthly_totals.get(hist_month, 0) or 0)
+
+                    hist_trend_total = 0.0
+                    margin_value = None
+
+                    temp_hist_data = get_historical_data(legacy_df, hist_month, n_for_rmla_model)
+                    hist_attainment = 0.0
+                    if temp_hist_data is not None and not temp_hist_data.empty:
+                        temp_curve = temp_hist_data.groupby('day_of_month')['percent_complete'].mean()
+                        hist_attainment = float(temp_curve.get(day, 0) or 0)
+                        if hist_attainment > 0:
+                            hist_trend_total = hist_mtd / hist_attainment
+                            if hist_actual_total > 0:
+                                margin_value = abs(hist_trend_total - hist_actual_total) / hist_actual_total
+                                history_errors.append(margin_value)
+
                     history_details.append({
                         'source_month': str(hist_month),
-                        'percent_complete': float(hist_row['percent_complete']),
-                        'mtd': float(hist_row['mtd']),
-                        'actual_total': actual_total,
-                        'implied_forecast': float(implied_forecast),
-                        'margin_of_error': float(margin_of_error),
+                        'percent_complete': hist_percent_complete,
+                        'mtd': hist_mtd,
+                        'actual_total': hist_actual_total,
+                        'implied_trend': float(hist_trend_total),
+                        'margin_of_error': float(margin_value) if margin_value is not None else None,
                     })
+
+                history_avg_margin = float(np.mean(history_errors)) if history_errors else None
 
                 records.append({
                     "Month": str(m),
                     "date": day_row['date'].strftime('%Y-%m-%d'),
                     "day_of_month": day,
                     "actual_eom_total": actual_eom_total,
-                    "fc_legacy": fc_legacy,
+                    "trend_estimate": trend_estimate_legacy,
                     "mtd_actual": mtd_actual,
                     "avg_percent_complete": pct_legacy,
+                    "history_avg_margin_of_error": history_avg_margin,
                 })
                 history_payloads.append(history_details)
 
         if records:
             report = pd.DataFrame(records).replace([np.inf, -np.inf], 0)
             report['history_details'] = history_payloads
-            report['error_fc_legacy'] = abs(
-                (report['fc_legacy'] - report['actual_eom_total']) / report['actual_eom_total']
+            report['error_trend_estimate'] = abs(
+                (report['trend_estimate'] - report['actual_eom_total']) / report['actual_eom_total']
             )
             
             # Monthly Performance
-            monthly_summary = report.groupby('Month')[['error_fc_legacy']].mean()
+            monthly_summary = report.groupby('Month')[['error_trend_estimate']].mean()
             
             # Overall Performance
-            accuracy = report['error_fc_legacy'].mean()
+            accuracy = report['error_trend_estimate'].mean()
             
             # Format results
             monthly_results = []
             for month, errors in monthly_summary.iterrows():
                 monthly_results.append({
                     'month': month,
-                    'error': errors['error_fc_legacy']
+                    'error': errors['error_trend_estimate']
                 })
 
             # Prepare day-level detail so the UI can inspect the raw backtest points
@@ -549,16 +557,22 @@ def api_backtest():
             daily_results = []
             for _, row in daily_report.iterrows():
                 avg_pct = float(row.get('avg_percent_complete', 0) or 0)
+                hist_avg_margin = row.get('history_avg_margin_of_error')
+                if pd.isna(hist_avg_margin):
+                    hist_avg_margin = None
+                else:
+                    hist_avg_margin = float(hist_avg_margin)
                 daily_results.append({
                     'month': row['Month'],
                     'date': row['date'],
                     'day_of_month': int(row['day_of_month']),
-                    'forecast': float(row['fc_legacy']),
+                    'trend_estimate': float(row['trend_estimate']),
                     'actual_total': float(row['actual_eom_total']),
                     'mtd': float(row['mtd_actual']),
                     'avg_percent_complete': avg_pct,
-                    'error': float(row['error_fc_legacy']),
+                    'error': float(row['error_trend_estimate']),
                     'history': row.get('history_details', []),
+                    'history_avg_margin_of_error': hist_avg_margin,
                 })
 
             return jsonify({

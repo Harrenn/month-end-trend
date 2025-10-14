@@ -60,7 +60,7 @@
                                 <th>Day</th>
                                 <th>Month</th>
                                 <th>MTD ({{ selected_trend_metric_label or 'Metric' }})</th>
-                                <th>Forecast ({{ selected_trend_metric_label or 'Metric' }})</th>
+                                <th>Trend ({{ selected_trend_metric_label or 'Metric' }})</th>
                                 <th>Actual ({{ selected_trend_metric_label or 'Metric' }})</th>
                                 <th>Error</th>
                                 <th>Details</th>
@@ -146,16 +146,20 @@ $(document).ready(function() {
                         );
 
                         rowsByMonth[monthKey].forEach(function(row) {
-                            const forecast = Number(row.forecast || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+                            const trendValue = Number(row.trend_estimate || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                             const actual = Number(row.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                             const mtd = Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                             const errorPct = ((row.error || 0) * 100).toFixed(2) + '%';
                             const history = row.history || [];
                             const avgPercent = ((row.avg_percent_complete || 0) * 100).toFixed(3) + '%';
                             const avgPercentDecimal = (row.avg_percent_complete || 0).toFixed(6);
-                            const calcForecast = row.avg_percent_complete ? (Number(row.mtd || 0) / row.avg_percent_complete) : 0;
-                            const calcForecastDisplay = row.avg_percent_complete
-                                ? Number(calcForecast).toLocaleString(undefined, { maximumFractionDigits: 2 })
+                            const calcTrend = row.avg_percent_complete ? (Number(row.mtd || 0) / row.avg_percent_complete) : 0;
+                            const calcTrendDisplay = row.avg_percent_complete
+                                ? Number(calcTrend).toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                : '—';
+                            const historyAvgMargin = row.history_avg_margin_of_error;
+                            const historyAvgMarginDisplay = (historyAvgMargin !== null && historyAvgMargin !== undefined)
+                                ? (Number(historyAvgMargin) * 100).toFixed(2) + '%'
                                 : '—';
                             const detailId = 'daily-detail-' + detailCounter++;
 
@@ -164,7 +168,10 @@ $(document).ready(function() {
                                 const pct = ((detail.percent_complete || 0) * 100).toFixed(3) + '%';
                                 const detailMtd = Number(detail.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                                 const detailActual = Number(detail.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-                                const detailMargin = ((detail.margin_of_error || 0) * 100).toFixed(2) + '%';
+                                const hasMargin = detail.margin_of_error !== null && detail.margin_of_error !== undefined;
+                                const detailMargin = hasMargin
+                                    ? (Number(detail.margin_of_error) * 100).toFixed(2) + '%'
+                                    : '—';
                                 historyRowsHtml += '<tr>' +
                                     '<td>' + detail.source_month + '</td>' +
                                     '<td>' + pct + '</td>' +
@@ -187,7 +194,7 @@ $(document).ready(function() {
                                     '<td>' + row.day_of_month + '</td>' +
                                     '<td>' + row.month + '</td>' +
                                     '<td>' + mtd + '</td>' +
-                                    '<td>' + forecast + '</td>' +
+                                    '<td>' + trendValue + '</td>' +
                                     '<td>' + actual + '</td>' +
                                     '<td>' + errorPct + '</td>' +
                                     '<td><button type="button" class="btn btn-sm btn-outline-secondary drilldown-toggle" data-detail-id="' + detailId + '">Details</button></td>' +
@@ -198,8 +205,9 @@ $(document).ready(function() {
                                     '<td colspan="8">' +
                                         '<div class="mb-2">' +
                                             '<strong>Average percent complete:</strong> ' + avgPercent + ' (' + avgPercentDecimal + ' as decimal)<br>' +
-                                            '<strong>Forecast calculation:</strong> ' + Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' / ' + avgPercentDecimal + ' = ' + calcForecastDisplay + '<br>' +
-                                            '<strong>Backtest forecast:</strong> ' + forecast +
+                                            '<strong>Trend calculation:</strong> ' + Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' / ' + avgPercentDecimal + ' = ' + calcTrendDisplay + '<br>' +
+                                            '<strong>Historical avg margin of error:</strong> ' + historyAvgMarginDisplay + '<br>' +
+                                            '<strong>Backtest trend value:</strong> ' + trendValue +
                                         '</div>' +
                                         historyTableHtml +
                                     '</td>' +

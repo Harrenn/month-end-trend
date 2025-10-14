@@ -11,15 +11,15 @@
                 {% endif %}
             </div>
             <div class="card-body">
-                <form id="forecast-form">
+                <form id="trend-form">
                     <div class="mb-3">
-                        <label for="forecast_month" class="form-label">Trend month (YYYY-MM)</label>
-                        <input type="text" class="form-control" id="forecast_month" placeholder="2025-08">
+                        <label for="trend_month" class="form-label">Trend month (YYYY-MM)</label>
+                        <input type="text" class="form-control" id="trend_month" placeholder="2025-08">
                     </div>
                     
                     <div class="mb-3">
-                        <label for="day_to_forecast" class="form-label">Day of month</label>
-                        <input type="number" class="form-control" id="day_to_forecast" min="1" max="31">
+                        <label for="day_to_trend" class="form-label">Day of month</label>
+                        <input type="number" class="form-control" id="day_to_trend" min="1" max="31">
                     </div>
                     
                     <div class="mb-3">
@@ -51,7 +51,7 @@
                     <p>Avg margin of error: <span id="margin-of-error"></span></p>
                     <div id="avg-percent-wrapper" style="display: none;">
                         <p>Average percent complete: <span id="avg-percent"></span> (<span id="avg-percent-decimal"></span>)</p>
-                        <p id="calc-forecast-line" class="mb-0"></p>
+                        <p id="calc-trend-line" class="mb-0"></p>
                     </div>
                     <button type="button" class="btn btn-sm btn-outline-secondary" id="history-toggle" style="display: none;">Show Details</button>
                     <div id="history-container" class="mt-3" style="display: none;">
@@ -96,30 +96,30 @@ $(document).ready(function() {
     yesterday.setDate(yesterday.getDate() - 1);
     
     const defaultMonth = yesterday.toISOString().slice(0, 7); // YYYY-MM format
-    $('#forecast_month').val(defaultMonth);
+    $('#trend_month').val(defaultMonth);
     
     // Set default day based on yesterday's date if it's the same month
     if (yesterday.toISOString().slice(0, 7) === defaultMonth) {
-        $('#day_to_forecast').val(yesterday.getDate());
+        $('#day_to_trend').val(yesterday.getDate());
     }
     
-    $('#forecast-form').on('submit', function(e) {
+    $('#trend-form').on('submit', function(e) {
         e.preventDefault();
         
         // Get form values
-        let forecast_month = $('#forecast_month').val();
-        let day_to_forecast = $('#day_to_forecast').val();
+        let trend_month = $('#trend_month').val();
+        let day_to_trend = $('#day_to_trend').val();
         const current_mtd = $('#current_mtd').val();
         const n_months_to_use = $('#n_months_to_use').val() || 6;
         const currentMtdNumber = Number(current_mtd || 0);
         
         // Use defaults if values are empty (like in the reference script)
-        if (!forecast_month) {
-            forecast_month = defaultMonth;
+        if (!trend_month) {
+            trend_month = defaultMonth;
         }
         
-        if (!day_to_forecast && yesterday.toISOString().slice(0, 7) === forecast_month) {
-            day_to_forecast = yesterday.getDate();
+        if (!day_to_trend && yesterday.toISOString().slice(0, 7) === trend_month) {
+            day_to_trend = yesterday.getDate();
         }
         
         // Validate required fields
@@ -135,30 +135,30 @@ $(document).ready(function() {
         $('#history-toggle').hide().text('Show Details');
         $('#avg-percent-wrapper').hide();
         $('#history-rows').empty();
-        $('#calc-forecast-line').text('');
+        $('#calc-trend-line').text('');
         
         console.log('Sending request with:', {
-            forecast_month: forecast_month,
-            day_to_forecast: day_to_forecast,
+            trend_month: trend_month,
+            day_to_trend: day_to_trend,
             current_mtd: current_mtd,
             n_months_to_use: n_months_to_use
         });
         
         // Send request to API
         $.ajax({
-            url: '/api/live_forecast',
+            url: '/api/live_trend',
             method: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({
-                forecast_month: forecast_month,
-                day_to_forecast: day_to_forecast,
+                trend_month: trend_month,
+                day_to_trend: day_to_trend,
                 current_mtd: current_mtd,
                 n_months_to_use: n_months_to_use
             }),
             success: function(data) {
                 console.log('Success response:', data);
                 // Display results
-                $('#predicted-total').text(parseFloat(data.forecast).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+                $('#predicted-total').text(parseFloat(data.trend_total).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
                 $('#margin-of-error').text((parseFloat(data.avg_margin_of_error) * 100).toFixed(2) + '%');
 
                 const avgPercentComplete = data.avg_percent_complete || 0;
@@ -166,9 +166,9 @@ $(document).ready(function() {
                     $('#avg-percent').text((avgPercentComplete * 100).toFixed(3) + '%');
                     $('#avg-percent-decimal').text(avgPercentComplete.toFixed(6));
                     $('#avg-percent-wrapper').show();
-                    const calcForecast = currentMtdNumber / avgPercentComplete;
-                    if (isFinite(calcForecast)) {
-                        $('#calc-forecast-line').text('Forecast calculation: ' + currentMtdNumber.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' / ' + avgPercentComplete.toFixed(6) + ' = ' + calcForecast.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+                    const calcTrend = currentMtdNumber / avgPercentComplete;
+                    if (isFinite(calcTrend)) {
+                        $('#calc-trend-line').text('Trend calculation: ' + currentMtdNumber.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' / ' + avgPercentComplete.toFixed(6) + ' = ' + calcTrend.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
                     }
                 }
 
@@ -178,7 +178,10 @@ $(document).ready(function() {
                         const pct = ((item.percent_complete || 0) * 100).toFixed(3) + '%';
                         const mtd = Number(item.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                         const actual = Number(item.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-                        const marginError = ((item.margin_of_error || 0) * 100).toFixed(2) + '%';
+                        const hasMargin = item.margin_of_error !== null && item.margin_of_error !== undefined;
+                        const marginError = hasMargin
+                            ? (Number(item.margin_of_error) * 100).toFixed(2) + '%'
+                            : '—';
                         $('#history-rows').append(
                             '<tr>' +
                                 '<td>' + item.source_month + '</td>' +
