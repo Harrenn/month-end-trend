@@ -395,12 +395,18 @@ def api_live_forecast():
                 hist_row['mtd'] / hist_row['percent_complete']
                 if hist_row['percent_complete'] > 0 else 0
             )
+            actual_total = float(monthly_totals.get(hist_month, 0))
+            margin_of_error = (
+                abs(implied_forecast - actual_total) / actual_total
+                if actual_total > 0 else 0
+            )
             history_details.append({
                 'source_month': str(hist_month),
                 'percent_complete': float(hist_row['percent_complete']),
                 'mtd': float(hist_row['mtd']),
-                'actual_total': float(monthly_totals.get(hist_month, 0)),
+                'actual_total': actual_total,
                 'implied_forecast': float(implied_forecast),
+                'margin_of_error': float(margin_of_error),
             })
 
         # Margin of Error Calculation
@@ -488,11 +494,22 @@ def api_backtest():
                 history_details = []
                 for _, hist_row in history_rows.iterrows():
                     hist_month = hist_row['year_month']
+                    implied_forecast = (
+                        hist_row['mtd'] / hist_row['percent_complete']
+                        if hist_row['percent_complete'] > 0 else 0
+                    )
+                    actual_total = float(monthly_totals.get(hist_month, 0))
+                    margin_of_error = (
+                        abs(implied_forecast - actual_total) / actual_total
+                        if actual_total > 0 else 0
+                    )
                     history_details.append({
                         'source_month': str(hist_month),
                         'percent_complete': float(hist_row['percent_complete']),
                         'mtd': float(hist_row['mtd']),
-                        'actual_total': float(monthly_totals.get(hist_month, 0)),
+                        'actual_total': actual_total,
+                        'implied_forecast': float(implied_forecast),
+                        'margin_of_error': float(margin_of_error),
                     })
 
                 records.append({

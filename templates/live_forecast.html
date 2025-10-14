@@ -62,7 +62,7 @@
                                     <th>Percent Complete</th>
                                     <th>MTD</th>
                                     <th>Actual Total</th>
-                                    <th>Implied Forecast</th>
+                                    <th>Margin of Error %</th>
                                 </tr>
                             </thead>
                             <tbody id="history-rows"></tbody>
@@ -178,14 +178,14 @@ $(document).ready(function() {
                         const pct = ((item.percent_complete || 0) * 100).toFixed(3) + '%';
                         const mtd = Number(item.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                         const actual = Number(item.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-                        const implied = Number(item.implied_forecast || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+                        const marginError = ((item.margin_of_error || 0) * 100).toFixed(2) + '%';
                         $('#history-rows').append(
                             '<tr>' +
                                 '<td>' + item.source_month + '</td>' +
                                 '<td>' + pct + '</td>' +
                                 '<td>' + mtd + '</td>' +
                                 '<td>' + actual + '</td>' +
-                                '<td>' + implied + '</td>' +
+                                '<td>' + marginError + '</td>' +
                             '</tr>'
                         );
                     });

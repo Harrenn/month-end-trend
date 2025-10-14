@@ -164,21 +164,19 @@ $(document).ready(function() {
                                 const pct = ((detail.percent_complete || 0) * 100).toFixed(3) + '%';
                                 const detailMtd = Number(detail.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                                 const detailActual = Number(detail.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-                                const detailForecast = detail.percent_complete > 0
-                                    ? Number(detail.mtd / detail.percent_complete).toLocaleString(undefined, { maximumFractionDigits: 2 })
-                                    : '—';
+                                const detailMargin = ((detail.margin_of_error || 0) * 100).toFixed(2) + '%';
                                 historyRowsHtml += '<tr>' +
                                     '<td>' + detail.source_month + '</td>' +
                                     '<td>' + pct + '</td>' +
                                     '<td>' + detailMtd + '</td>' +
                                     '<td>' + detailActual + '</td>' +
-                                    '<td>' + detailForecast + '</td>' +
+                                    '<td>' + detailMargin + '</td>' +
                                 '</tr>';
                             });
 
                             const historyTableHtml = history.length
                                 ? '<table class="table table-sm mb-0">' +
-                                    '<thead><tr><th>Source Month</th><th>Percent Complete</th><th>MTD</th><th>Actual Total</th><th>Implied Forecast</th></tr></thead>' +
+                                    '<thead><tr><th>Source Month</th><th>Percent Complete</th><th>MTD</th><th>Actual Total</th><th>Margin of Error %</th></tr></thead>' +
                                     '<tbody>' + historyRowsHtml + '</tbody>' +
                                   '</table>'
                                 : '<p class="mb-0 text-muted">No historical data available for this day.</p>';
