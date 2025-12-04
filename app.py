@@ -79,6 +79,18 @@ def load_and_prepare_data(file_path, value_column, segment_column=None):
             segments[segment_value] = aggregated
 
     overall = df.groupby('date', as_index=False)['collection'].sum()
+
+    if not df.empty:
+        min_date = df['date'].min()
+        max_date = df['date'].max()
+        all_dates = pd.date_range(start=min_date, end=max_date, freq='D')
+        date_df = pd.DataFrame({'date': all_dates})
+
+        overall = pd.merge(date_df, overall, on='date', how='left').fillna({'collection': 0})
+
+        for segment_value in segments:
+            segments[segment_value] = pd.merge(date_df, segments[segment_value], on='date', how='left').fillna({'collection': 0})
+
     return overall, segments
 
 def get_historical_data(df, test_month, n_months):
@@ -615,4 +627,6 @@ def api_upload():
         return jsonify({'error': str(e)}), 400
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5002)
+    debug_env = os.environ.get('FLASK_DEBUG', '')
+    debug_enabled = debug_env.lower() in {'1', 'true', 'yes'}
+    app.run(debug=debug_enabled, host='0.0.0.0', port=5002)
