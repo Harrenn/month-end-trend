@@ -85,25 +85,129 @@
         </div>
     </div>
 </div>
+
+<div class="row mt-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                <h2>Single Month Backtest {% if selected_trend_label %}<small class="text-muted">({{ selected_trend_label }})</small>{% endif %}</h2>
+                {% if selected_segment_label %}
+                <p class="text-muted mb-0">Segment: {{ selected_segment_label }}</p>
+                {% endif %}
+            </div>
+            <div class="card-body">
+                <form id="single-month-backtest-form">
+                    <div class="mb-3">
+                        <label for="single_month_test_month" class="form-label">Month to Test</label>
+                        <select class="form-select" id="single_month_test_month" required>
+                            <option value="">Select Month</option>
+                            <option value="1">January</option>
+                            <option value="2">February</option>
+                            <option value="3">March</option>
+                            <option value="4">April</option>
+                            <option value="5">May</option>
+                            <option value="6">June</option>
+                            <option value="7">July</option>
+                            <option value="8">August</option>
+                            <option value="9">September</option>
+                            <option value="10">October</option>
+                            <option value="11">November</option>
+                            <option value="12">December</option>
+                        </select>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="single_month_n_for_rmla_model" class="form-label">Training window (months)</label>
+                        <input type="number" class="form-control" id="single_month_n_for_rmla_model" min="1" value="6" required>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Run Single Month Backtest</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div id="single-month-result-container" style="display: none;">
+            <div class="card result-card">
+                <div class="card-header">
+                    <h3>Single Month Backtest Results for <span id="single-month-result-month-name"></span></h3>
+                </div>
+                <div class="card-body">
+                    <h4>Overall Avg Error</h4>
+                    <p>Legacy RMLA: <span id="single-month-overall-accuracy"></span></p>
+
+                    <h4>Monthly Error</h4>
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Month</th>
+                                <th>Average Error</th>
+                            </tr>
+                        </thead>
+                        <tbody id="single-month-monthly-results">
+                        </tbody>
+                    </table>
+                    
+                    <h4>Daily Detail</h4>
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Day</th>
+                                <th>Month</th>
+                                <th>MTD ({{ selected_trend_metric_label or 'Metric' }})</th>
+                                <th>Trend ({{ selected_trend_metric_label or 'Metric' }})</th>
+                                <th>Actual ({{ selected_trend_metric_label or 'Metric' }})</th>
+                                <th>Error</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="single-month-daily-results">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <div id="single-month-error-container" style="display: none;">
+            <div class="card error-card">
+                <div class="card-header">
+                    <h3>Error</h3>
+                </div>
+                <div class="card-body">
+                    <p id="single-month-error-message"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
 let detailCounter = 0;
 
+const monthNames = [
+    "", // 0-indexed, so month 1 is January
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+];
+
 $(document).ready(function() {
+    // Handler for the original multi-month backtest form
     $('#backtest-form').on('submit', function(e) {
         e.preventDefault();
         
-        // Get form values
         const test_period_months = $('#test_period_months').val();
         const n_for_rmla_model = $('#n_for_rmla_model').val();
         
-        // Hide previous results
         $('#result-container').hide();
         $('#error-container').hide();
         
-        // Send request to API
         $.ajax({
             url: '/api/backtest',
             method: 'POST',
@@ -113,10 +217,8 @@ $(document).ready(function() {
                 n_for_rmla_model: n_for_rmla_model
             }),
             success: function(data) {
-                // Display results
                 $('#overall-accuracy').text((data.overall_accuracy * 100).toFixed(2) + '%');
                 
-                // Clear and populate monthly results
                 $('#monthly-results').empty();
                 data.monthly_results.forEach(function(result) {
                     $('#monthly-results').append(
@@ -124,7 +226,6 @@ $(document).ready(function() {
                     );
                 });
 
-                // Clear and populate daily results
                 $('#daily-results').empty();
                 detailCounter = 0;
                 if (data.daily_results && data.daily_results.length) {
@@ -137,9 +238,7 @@ $(document).ready(function() {
                     });
 
                     Object.keys(rowsByMonth).sort().forEach(function(monthKey) {
-                        rowsByMonth[monthKey].sort(function(a, b) {
-                            return (a.day_of_month || 0) - (b.day_of_month || 0);
-                        });
+                        rowsByMonth[monthKey].sort((a, b) => (a.day_of_month || 0) - (b.day_of_month || 0));
 
                         $('#daily-results').append(
                             '<tr class="table-light"><td colspan="8"><strong>' + monthKey + '</strong></td></tr>'
@@ -150,69 +249,8 @@ $(document).ready(function() {
                             const actual = Number(row.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                             const mtd = Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
                             const errorPct = ((row.error || 0) * 100).toFixed(2) + '%';
-                            const history = row.history || [];
-                            const avgPercent = ((row.avg_percent_complete || 0) * 100).toFixed(3) + '%';
-                            const avgPercentDecimal = (row.avg_percent_complete || 0).toFixed(6);
-                            const calcTrend = row.avg_percent_complete ? (Number(row.mtd || 0) / row.avg_percent_complete) : 0;
-                            const calcTrendDisplay = row.avg_percent_complete
-                                ? Number(calcTrend).toLocaleString(undefined, { maximumFractionDigits: 2 })
-                                : '—';
-                            const historyAvgMargin = row.history_avg_margin_of_error;
-                            const historyAvgMarginDisplay = (historyAvgMargin !== null && historyAvgMargin !== undefined)
-                                ? (Number(historyAvgMargin) * 100).toFixed(2) + '%'
-                                : '—';
                             const detailId = 'daily-detail-' + detailCounter++;
-
-                            let historyRowsHtml = '';
-                            history.forEach(function(detail) {
-                                const pct = ((detail.percent_complete || 0) * 100).toFixed(3) + '%';
-                                const detailMtd = Number(detail.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-                                const detailActual = Number(detail.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-                                const hasMargin = detail.margin_of_error !== null && detail.margin_of_error !== undefined;
-                                const detailMargin = hasMargin
-                                    ? (Number(detail.margin_of_error) * 100).toFixed(2) + '%'
-                                    : '—';
-                                historyRowsHtml += '<tr>' +
-                                    '<td>' + detail.source_month + '</td>' +
-                                    '<td>' + pct + '</td>' +
-                                    '<td>' + detailMtd + '</td>' +
-                                    '<td>' + detailActual + '</td>' +
-                                    '<td>' + detailMargin + '</td>' +
-                                '</tr>';
-                            });
-
-                            const historyTableHtml = history.length
-                                ? '<table class="table table-sm mb-0">' +
-                                    '<thead><tr><th>Source Month</th><th>Percent Complete</th><th>MTD</th><th>Actual Total</th><th>Margin of Error %</th></tr></thead>' +
-                                    '<tbody>' + historyRowsHtml + '</tbody>' +
-                                  '</table>'
-                                : '<p class="mb-0 text-muted">No historical data available for this day.</p>';
-
-                            $('#daily-results').append(
-                                '<tr>' +
-                                    '<td>' + row.date + '</td>' +
-                                    '<td>' + row.day_of_month + '</td>' +
-                                    '<td>' + row.month + '</td>' +
-                                    '<td>' + mtd + '</td>' +
-                                    '<td>' + trendValue + '</td>' +
-                                    '<td>' + actual + '</td>' +
-                                    '<td>' + errorPct + '</td>' +
-                                    '<td><button type="button" class="btn btn-sm btn-outline-secondary drilldown-toggle" data-detail-id="' + detailId + '">Details</button></td>' +
-                                '</tr>'
-                            );
-                            $('#daily-results').append(
-                                '<tr id="' + detailId + '" class="daily-detail-row" style="display:none;">' +
-                                    '<td colspan="8">' +
-                                        '<div class="mb-2">' +
-                                            '<strong>Average percent complete:</strong> ' + avgPercent + ' (' + avgPercentDecimal + ' as decimal)<br>' +
-                                            '<strong>Trend calculation:</strong> ' + Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' / ' + avgPercentDecimal + ' = ' + calcTrendDisplay + '<br>' +
-                                            '<strong>Historical avg margin of error:</strong> ' + historyAvgMarginDisplay + '<br>' +
-                                            '<strong>Backtest trend value:</strong> ' + trendValue +
-                                        '</div>' +
-                                        historyTableHtml +
-                                    '</td>' +
-                                '</tr>'
-                            );
+                            appendDetailRow(row, detailId, '#daily-results');
                         });
                     });
                 }
@@ -220,14 +258,147 @@ $(document).ready(function() {
                 $('#result-container').show();
             },
             error: function(xhr) {
-                // Display error
                 const errorData = JSON.parse(xhr.responseText);
                 $('#error-message').text(errorData.error);
                 $('#error-container').show();
             }
         });
     });
+
+    // Handler for the new single calendar month backtest form
+    $('#single-month-backtest-form').on('submit', function(e) {
+        e.preventDefault();
+        
+        const month_number = $('#single_month_test_month').val();
+        const n_for_rmla_model = $('#single_month_n_for_rmla_model').val();
+        
+        $('#single-month-result-container').hide();
+        $('#single-month-error-container').hide();
+        
+        $.ajax({
+            url: '/api/single_month_backtest',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                month_number: month_number,
+                n_for_rmla_model: n_for_rmla_model
+            }),
+            success: function(data) {
+                $('#single-month-result-month-name').text(monthNames[data.month_number]);
+                $('#single-month-overall-accuracy').text((data.overall_accuracy * 100).toFixed(2) + '%');
+
+                $('#single-month-monthly-results').empty();
+                data.monthly_results.forEach(function(result) {
+                    $('#single-month-monthly-results').append(
+                        '<tr><td>' + result.month + '</td><td>' + (result.error * 100).toFixed(2) + '%</td></tr>'
+                    );
+                });
+
+                $('#single-month-daily-results').empty();
+                detailCounter = 0;
+
+                if (data.daily_results && data.daily_results.length) {
+                    const rowsByMonth = {};
+                    data.daily_results.forEach(function(row) {
+                        if (!rowsByMonth[row.month]) {
+                            rowsByMonth[row.month] = [];
+                        }
+                        rowsByMonth[row.month].push(row);
+                    });
+
+                    Object.keys(rowsByMonth).sort().forEach(function(monthKey) {
+                        rowsByMonth[monthKey].sort((a, b) => (a.day_of_month || 0) - (b.day_of_month || 0));
+
+                        $('#single-month-daily-results').append(
+                            '<tr class="table-light"><td colspan="8"><strong>' + monthKey + '</strong></td></tr>'
+                        );
+
+                        rowsByMonth[monthKey].forEach(function(row) {
+                            const detailId = 'single-month-daily-detail-' + detailCounter++;
+                            appendDetailRow(row, detailId, '#single-month-daily-results');
+                        });
+                    });
+                }
+                
+                $('#single-month-result-container').show();
+            },
+            error: function(xhr) {
+                const errorData = JSON.parse(xhr.responseText);
+                $('#single-month-error-message').text(errorData.error);
+                $('#single-month-error-container').show();
+            }
+        });
+    });
 });
+
+function appendDetailRow(row, detailId, targetTbody) {
+    const trendValue = Number(row.trend_estimate || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const actual = Number(row.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const mtd = Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    const errorPct = ((row.error || 0) * 100).toFixed(2) + '%';
+    const history = row.history || [];
+    const avgPercent = ((row.avg_percent_complete || 0) * 100).toFixed(3) + '%';
+    const avgPercentDecimal = (row.avg_percent_complete || 0).toFixed(6);
+    const calcTrend = row.avg_percent_complete ? (Number(row.mtd || 0) / row.avg_percent_complete) : 0;
+    const calcTrendDisplay = row.avg_percent_complete
+        ? Number(calcTrend).toLocaleString(undefined, { maximumFractionDigits: 2 })
+        : '—';
+    const historyAvgMargin = row.history_avg_margin_of_error;
+    const historyAvgMarginDisplay = (historyAvgMargin !== null && historyAvgMargin !== undefined)
+        ? (Number(historyAvgMargin) * 100).toFixed(2) + '%'
+        : '—';
+
+    let historyRowsHtml = '';
+    history.forEach(function(detail) {
+        const pct = ((detail.percent_complete || 0) * 100).toFixed(3) + '%';
+        const detailMtd = Number(detail.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+        const detailActual = Number(detail.actual_total || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+        const hasMargin = detail.margin_of_error !== null && detail.margin_of_error !== undefined;
+        const detailMargin = hasMargin
+            ? (Number(detail.margin_of_error) * 100).toFixed(2) + '%'
+            : '—';
+        historyRowsHtml += '<tr>' +
+            '<td>' + detail.source_month + '</td>' +
+            '<td>' + pct + '</td>' +
+            '<td>' + detailMtd + '</td>' +
+            '<td>' + detailActual + '</td>' +
+            '<td>' + detailMargin + '</td>' +
+        '</tr>';
+    });
+
+    const historyTableHtml = history.length
+        ? '<table class="table table-sm mb-0">' +
+            '<thead><tr><th>Source Month</th><th>Percent Complete</th><th>MTD</th><th>Actual Total</th><th>Margin of Error %</th></tr></thead>' +
+            '<tbody>' + historyRowsHtml + '</tbody>' +
+          '</table>'
+        : '<p class="mb-0 text-muted">No historical data available for this day.</p>';
+
+    $(targetTbody).append(
+        '<tr>' +
+            '<td>' + row.date + '</td>' +
+            '<td>' + row.day_of_month + '</td>' +
+            '<td>' + row.month + '</td>' +
+            '<td>' + mtd + '</td>' +
+            '<td>' + trendValue + '</td>' +
+            '<td>' + actual + '</td>' +
+            '<td>' + errorPct + '</td>' +
+            '<td><button type="button" class="btn btn-sm btn-outline-secondary drilldown-toggle" data-detail-id="' + detailId + '">Details</button></td>' +
+        '</tr>'
+    );
+    $(targetTbody).append(
+        '<tr id="' + detailId + '" class="daily-detail-row" style="display:none;">' +
+            '<td colspan="8">' +
+                '<div class="mb-2">' +
+                    '<strong>Average percent complete:</strong> ' + avgPercent + ' (' + avgPercentDecimal + ' as decimal)<br>' +
+                    '<strong>Trend calculation:</strong> ' + Number(row.mtd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' / ' + avgPercentDecimal + ' = ' + calcTrendDisplay + '<br>' +
+                    '<strong>Historical avg margin of error:</strong> ' + historyAvgMarginDisplay + '<br>' +
+                    '<strong>Backtest trend value:</strong> ' + trendValue +
+                '</div>' +
+                historyTableHtml +
+            '</td>' +
+        '</tr>'
+    );
+}
 
 $(document).on('click', '.drilldown-toggle', function() {
     const detailId = $(this).data('detailId');

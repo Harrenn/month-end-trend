@@ -96,8 +96,6 @@ def load_and_prepare_data(file_path, value_column, segment_column=None):
 def get_historical_data(df, test_month, n_months):
     """Gets historical data for the Legacy RMLA model."""
     days_in_month = test_month.days_in_month
-    if days_in_month <= 29:
-        return None
     potential_history = df[(df['month_days'] == days_in_month) & (df['year_month'] < test_month)]
     recent_n = potential_history['year_month'].unique()[-n_months:]
     history = potential_history[potential_history['year_month'].isin(recent_n)]
@@ -623,6 +621,169 @@ def api_upload():
         get_selected_segment_key(trend_key)
 
         return jsonify({'message': f"{config['label']} data updated successfully"}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/api/single_month_backtest', methods=['POST'])
+def api_single_month_backtest():
+    trend_key = get_selected_trend_key()
+    if trend_key is None:
+        return jsonify({'error': 'Select a trend before running the backtest.'}), 400
+
+    context = get_trend_context(trend_key)
+    if context.get('error'):
+        return jsonify({'error': context['error']}), 400
+
+    segment_context = get_segment_context(trend_key)
+    if segment_context is None or segment_context.get('error'):
+        error_msg = segment_context.get('error') if segment_context else 'Data not available for the selected segment.'
+        return jsonify({'error': error_msg}), 400
+
+    legacy_df = segment_context.get('legacy_df')
+    monthly_totals = segment_context.get('monthly_totals')
+    
+    if legacy_df is None or monthly_totals is None:
+        return jsonify({'error': 'Data not available for the selected segment.'}), 500
+    
+    try:
+        data = request.get_json()
+        
+        # Get input values
+        month_number = int(data.get('month_number'))
+        n_for_rmla_model = int(data.get('n_for_rmla_model', 6))
+        
+        if not (1 <= month_number <= 12):
+            return jsonify({'error': 'Month number must be between 1 and 12.'}), 400
+
+        records = []
+        all_history_payloads = [] # Accumulate history payloads from all months
+
+        all_months_in_data = sorted(legacy_df['year_month'].unique())
+        months_to_backtest = [m for m in all_months_in_data if m.month == month_number]
+        
+        if not months_to_backtest:
+            return jsonify({'error': f"No data found for month {month_number} in historical records."}), 400
+
+        for test_month in months_to_backtest:
+            historical_data = get_historical_data(legacy_df, test_month, n_for_rmla_model)
+            if historical_data is None:
+                continue # Skip if not enough historical data for this specific month instance
+            
+            legacy_curve = historical_data.groupby('day_of_month')['percent_complete'].mean().sort_index()
+            
+            month_data = legacy_df[legacy_df['year_month'] == test_month]
+            actual_eom_total = monthly_totals[test_month]
+
+            for _, day_row in month_data.iterrows():
+                day, mtd_actual = day_row['day_of_month'], day_row['mtd']
+                pct_legacy = legacy_curve.get(day, 0)
+                trend_estimate_legacy = mtd_actual / pct_legacy if pct_legacy > 0 else 0
+
+                history_details = []
+                history_errors = []
+                # Recalculate history details for each day within the month
+                # This part is identical to the original api_backtest's inner loop
+                historical_months_for_day = historical_data[historical_data['day_of_month'] == day]['year_month'].unique()
+                for hist_month in historical_months_for_day:
+                    hist_month_day_data = legacy_df[
+                        (legacy_df['year_month'] == hist_month) & (legacy_df['day_of_month'] == day)
+                    ]
+                    if hist_month_day_data.empty:
+                        continue
+
+                    hist_mtd = float(hist_month_day_data['mtd'].iloc[0])
+                    hist_percent_complete = float(hist_month_day_data['percent_complete'].iloc[0])
+                    hist_actual_total = float(monthly_totals.get(hist_month, 0) or 0)
+
+                    hist_trend_total = 0.0
+                    margin_value = None
+
+                    temp_hist_data = get_historical_data(legacy_df, hist_month, n_for_rmla_model)
+                    hist_attainment = 0.0
+                    if temp_hist_data is not None and not temp_hist_data.empty:
+                        temp_curve = temp_hist_data.groupby('day_of_month')['percent_complete'].mean()
+                        hist_attainment = float(temp_curve.get(day, 0) or 0)
+                        if hist_attainment > 0:
+                            hist_trend_total = hist_mtd / hist_attainment
+                            if hist_actual_total > 0:
+                                margin_value = abs(hist_trend_total - hist_actual_total) / hist_actual_total
+                                history_errors.append(margin_value)
+
+                    history_details.append({
+                        'source_month': str(hist_month),
+                        'percent_complete': hist_percent_complete,
+                        'mtd': hist_mtd,
+                        'actual_total': hist_actual_total,
+                        'implied_trend': float(hist_trend_total),
+                        'margin_of_error': float(margin_value) if margin_value is not None else None,
+                    })
+
+                history_avg_margin = float(np.mean(history_errors)) if history_errors else None
+
+                records.append({
+                    "Month": str(test_month),
+                    "date": day_row['date'].strftime('%Y-%m-%d'),
+                    "day_of_month": day,
+                    "actual_eom_total": actual_eom_total,
+                    "trend_estimate": trend_estimate_legacy,
+                    "mtd_actual": mtd_actual,
+                    "avg_percent_complete": pct_legacy,
+                    "history_avg_margin_of_error": history_avg_margin,
+                })
+                all_history_payloads.append(history_details) # Accumulate all history details
+
+        if records:
+            report = pd.DataFrame(records).replace([np.inf, -np.inf], 0)
+            report['history_details'] = all_history_payloads
+            report['error_trend_estimate'] = abs(
+                (report['trend_estimate'] - report['actual_eom_total']) / report['actual_eom_total']
+            )
+            
+            # Monthly Performance (for each year of the chosen month)
+            monthly_summary = report.groupby('Month')[['error_trend_estimate']].mean()
+            
+            # Overall Performance for the chosen calendar month across all backtested years
+            overall_accuracy = report['error_trend_estimate'].mean()
+            
+            # Format results
+            monthly_results = []
+            for month, errors in monthly_summary.iterrows():
+                monthly_results.append({
+                    'month': month,
+                    'error': errors['error_trend_estimate']
+                })
+
+            # Prepare day-level detail so the UI can inspect the raw backtest points
+            daily_report = report.sort_values(['Month', 'day_of_month'])
+            daily_results = []
+            for _, row in daily_report.iterrows():
+                avg_pct = float(row.get('avg_percent_complete', 0) or 0)
+                hist_avg_margin = row.get('history_avg_margin_of_error')
+                if pd.isna(hist_avg_margin):
+                    hist_avg_margin = None
+                else:
+                    hist_avg_margin = float(hist_avg_margin)
+                daily_results.append({
+                    'month': row['Month'],
+                    'date': row['date'],
+                    'day_of_month': int(row['day_of_month']),
+                    'trend_estimate': float(row['trend_estimate']),
+                    'actual_total': float(row['actual_eom_total']),
+                    'mtd': float(row['mtd_actual']),
+                    'avg_percent_complete': avg_pct,
+                    'error': float(row['error_trend_estimate']),
+                    'history': row.get('history_details', []),
+                    'history_avg_margin_of_error': hist_avg_margin,
+                })
+
+            return jsonify({
+                'month_number': month_number,
+                'monthly_results': monthly_results,
+                'daily_results': daily_results,
+                'overall_accuracy': overall_accuracy,
+            })
+        else:
+            return jsonify({'error': f'No records generated for month {month_number}.'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
