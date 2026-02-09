@@ -18,6 +18,8 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-me')
 
 DATA_ROOT = os.path.join(os.path.dirname(__file__), 'data')
 
+# Configuration for different trend types, including their labels,
+# the column to use for metric values, and their respective data files.
 TREND_CONFIG = {
     'collection': {
         'label': 'Collection Trend',
@@ -56,7 +58,12 @@ for trend_key, config in TREND_CONFIG.items():
 # --- Re-usable functions ---
 
 def load_and_prepare_data(file_path, value_column, segment_column=None):
-    """Loads and cleans the base data for a given trend."""
+    """
+    Loads and cleans the base data for a given trend.
+    This function reads a CSV, renames the primary value column,
+    handles missing or non-numeric values, and prepares the data
+    for both overall and segmented analysis.
+    """
     try:
         df = pd.read_csv(file_path, parse_dates=['date'])
     except FileNotFoundError:
@@ -94,7 +101,11 @@ def load_and_prepare_data(file_path, value_column, segment_column=None):
     return overall, segments
 
 def get_historical_data(df, test_month, n_months):
-    """Gets historical data for the Legacy RMLA model."""
+    """
+    Extracts historical data points relevant for the Legacy RMLA model.
+    It filters data to find months with the same number of days as the `test_month`
+    and retrieves a specified number of recent historical months.
+    """
     days_in_month = test_month.days_in_month
     potential_history = df[(df['month_days'] == days_in_month) & (df['year_month'] < test_month)]
     recent_n = potential_history['year_month'].unique()[-n_months:]
@@ -102,7 +113,11 @@ def get_historical_data(df, test_month, n_months):
     return history if not history.empty else None
 
 def prepare_data(df):
-    """Prepare data for Legacy Model"""
+    """
+    Prepares data for the Legacy Model by adding time-based features
+    like 'year_month', 'month_days', 'day_of_month', and calculating
+    Month-To-Date (MTD) and 'percent_complete' for each month.
+    """
     if df is None:
         return None, None
     
@@ -120,7 +135,12 @@ def prepare_data(df):
     return legacy_df, monthly_totals
 
 def refresh_trend_data(trend_key):
-    """Reloads source data for a trend into memory."""
+    """
+    Reloads and processes source data for a given trend key into memory.
+    This includes loading the raw data, preparing it for the legacy model,
+    and populating segment-specific contexts within the trend_store.
+    Handles file not found and value error exceptions during data loading.
+    """
     config = TREND_CONFIG[trend_key]
     context = trend_store.setdefault(trend_key, {})
     segment_column = config.get('segment_column')
@@ -626,6 +646,12 @@ def api_upload():
 
 @app.route('/api/single_month_backtest', methods=['POST'])
 def api_single_month_backtest():
+    """
+    Backtests the Legacy RMLA model for a specific calendar month across all available years in the dataset.
+    This endpoint allows users to evaluate the model's performance for a chosen month (e.g., all Januarys, all Februaries).
+    It calculates daily trend estimates, compares them to actual end-of-month totals, and provides
+    overall and monthly accuracy metrics, including historical context for each daily estimate.
+    """
     trend_key = get_selected_trend_key()
     if trend_key is None:
         return jsonify({'error': 'Select a trend before running the backtest.'}), 400
