@@ -201,14 +201,37 @@ def load_and_prepare_data(csv_bytes, value_column, segment_column=None):
     try:
         if csv_bytes is None:
             return None, {}
-        df = pd.read_csv(BytesIO(csv_bytes), parse_dates=['date'])
+        df = pd.read_csv(BytesIO(csv_bytes))
     except FileNotFoundError:
         return None, {}
 
-    if value_column not in df.columns:
+    def canonical(col_name):
+        return str(col_name).strip().lower().replace(' ', '_')
+
+    raw_columns = list(df.columns)
+    canonical_lookup = {canonical(col): col for col in raw_columns}
+
+    date_source_column = canonical_lookup.get('date')
+    value_source_column = canonical_lookup.get(canonical(value_column))
+    segment_source_column = (
+        canonical_lookup.get(canonical(segment_column))
+        if segment_column
+        else None
+    )
+
+    if not date_source_column:
+        raise ValueError("Expected column 'date' in uploaded data")
+    if not value_source_column:
         raise ValueError(f"Expected column '{value_column}' in uploaded data")
 
-    df = df.rename(columns={value_column: 'collection'})
+    rename_map = {
+        date_source_column: 'date',
+        value_source_column: 'collection',
+    }
+    if segment_column and segment_source_column:
+        rename_map[segment_source_column] = segment_column
+
+    df = df.rename(columns=rename_map)
     df['collection'] = pd.to_numeric(df['collection'], errors='coerce').fillna(0)
     df = df.dropna(subset=['date']).copy()
     df['date'] = pd.to_datetime(df['date'])
@@ -216,7 +239,13 @@ def load_and_prepare_data(csv_bytes, value_column, segment_column=None):
 
     segments = {}
     if segment_column and segment_column in df.columns:
-        df[segment_column] = df[segment_column].fillna('Unspecified').astype(str)
+        df[segment_column] = (
+            df[segment_column]
+            .fillna('Unspecified')
+            .astype(str)
+            .str.strip()
+            .replace('', 'Unspecified')
+        )
         for segment_value, seg_df in df.groupby(segment_column):
             aggregated = seg_df.groupby('date', as_index=False)['collection'].sum()
             segments[segment_value] = aggregated
