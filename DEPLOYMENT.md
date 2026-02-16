@@ -1,105 +1,69 @@
-# Deployment Guide
+# Deployment Guide (Vercel)
 
-This project is a Flask web application that can be run with the built-in
-development server. For a lightweight deployment you can run the same command
-under `systemd` so it restarts automatically if it stops.
+This project is deployed as a Python serverless app on Vercel.
 
 ## 1. Prerequisites
 
-- Python 3.10 or newer.
-- A virtual environment tool such as `python -m venv`.
-- Access to systemd (most modern Linux distributions).
+- A Vercel account and a linked project.
+- Python 3.10+ for local development.
+- Vercel Blob store enabled in your Vercel project.
 
-## 2. Initial Setup
+## 2. Runtime layout
+
+- `vercel.json` routes all requests to `api/index.py`.
+- `api/index.py` exposes the Flask app from `app.py`.
+- Existing Flask routes and templates remain unchanged.
+
+## 3. Required environment variables
+
+Set these in Vercel Project Settings -> Environment Variables:
+
+- `FLASK_SECRET_KEY`: random secret for Flask sessions.
+- `STORAGE_BACKEND=vercel_blob`
+- `BLOB_READ_WRITE_TOKEN`: Vercel Blob read/write token.
+
+Optional:
+
+- `VERCEL_BLOB_BASE_URL` (default: `https://blob.vercel-storage.com`)
+- `VERCEL_BLOB_PATH_PREFIX` (for namespacing blob paths)
+
+## 4. Shared data keys
+
+The app uses fixed shared blob paths:
+
+- `collection/collection_data.csv`
+- `releases/releases_data.csv`
+
+Uploads overwrite these paths (single shared dataset behavior).
+
+## 5. Deploy
+
+```bash
+vercel
+```
+
+For production:
+
+```bash
+vercel --prod
+```
+
+## 6. Local development
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-Environment variables:
-
-- `FLASK_SECRET_KEY`: set this to a unique, random string in production.
-- Optional: `FLASK_DEBUG=1` if you want Flask's debug mode locally.
-
-The application expects CSV files under the `data/` directory. The startup code
-creates per-trend subdirectories automatically, but ensure the service user has
-read/write access if uploads will be performed.
-
-## 3. Local Development
-
-```bash
-# Development server (auto-reloads if FLASK_DEBUG=1)
 python app.py
 ```
 
-## 4. systemd Service
+For local filesystem mode (default), no Blob env vars are required.
+For Blob-backed local testing, set `STORAGE_BACKEND=vercel_blob` and `BLOB_READ_WRITE_TOKEN`.
 
-1. Create a service account (recommended):
+## 7. Data freshness reminder
 
-   ```bash
-   sudo useradd --system --create-home --shell /usr/sbin/nologin trend
-   sudo chown -R trend:trend /home/trend/trend_web
-   ```
+The UI shows a non-blocking reminder when dataset latest month is older than the previous calendar month.
 
-2. Create an environment file to store secrets, e.g. `/etc/sysconfig/trend_web`:
-
-   ```
-   FLASK_SECRET_KEY=replace-me-with-a-random-string
-   ```
-
-3. Create `/etc/systemd/system/trend_web.service` with the contents below
-   (update paths to match your checkout location and Python version):
-
-   ```
-   [Unit]
-   Description=Trend Web Flask Application
-   After=network.target
-
-   [Service]
-   User=trend
-   Group=trend
-   WorkingDirectory=/home/trend/trend_web
-   EnvironmentFile=/etc/sysconfig/trend_web
-   ExecStart=/home/trend/trend_web/.venv/bin/python /home/trend/trend_web/app.py
-   Restart=always
-   RestartSec=5
-   KillSignal=SIGINT
-   TimeoutStopSec=30
-   PrivateTmp=true
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-4. Reload systemd and enable the service:
-
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now trend_web.service
-   ```
-
-5. Inspect logs:
-
-   ```bash
-   journalctl -u trend_web.service -f
-   ```
-
-The Flask app honours `FLASK_DEBUG`; leave it unset (or set it to `0`) when running
-under systemd so the development reloader stays disabled. `Restart=always` will
-bring the service back whenever it exits.
-
-## 5. Updating the Service
-
-```bash
-sudo systemctl stop trend_web.service
-git pull origin main
-source /home/trend/trend_web/.venv/bin/activate
-pip install -r requirements.txt
-sudo systemctl start trend_web.service
-```
-
-Use `sudo systemctl restart trend_web.service` for quick restarts when you only
-modify Python code.
+Example on February 16, 2026:
+- Latest month `2025-12` -> stale (reminder shown)
+- Latest month `2026-01` -> fresh (no reminder)

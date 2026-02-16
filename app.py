@@ -1,4 +1,10 @@
 import os
+import json
+from datetime import datetime, timezone
+from io import BytesIO
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 import numpy as np
 import pandas as pd
@@ -17,6 +23,9 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-me')
 
 DATA_ROOT = os.path.join(os.path.dirname(__file__), 'data')
+
+STORAGE_LOCAL = 'local'
+STORAGE_VERCEL_BLOB = 'vercel_blob'
 
 # Configuration for different trend types, including their labels,
 # the column to use for metric values, and their respective data files.
@@ -39,16 +48,141 @@ TREND_CONFIG = {
 
 trend_store = {}
 
+
+class StorageAdapter:
+    def read_trend_csv(self, trend_key):
+        raise NotImplementedError
+
+    def write_trend_csv(self, trend_key, file_bytes):
+        raise NotImplementedError
+
+
+class LocalFileStorageAdapter(StorageAdapter):
+    def __init__(self, trend_config):
+        self.trend_config = trend_config
+
+    def read_trend_csv(self, trend_key):
+        file_path = self.trend_config[trend_key]['file_path']
+        try:
+            with open(file_path, 'rb') as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return None
+
+    def write_trend_csv(self, trend_key, file_bytes):
+        file_path = self.trend_config[trend_key]['file_path']
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'wb') as handle:
+            handle.write(file_bytes)
+
+
+class VercelBlobStorageAdapter(StorageAdapter):
+    def __init__(self, trend_config):
+        self.trend_config = trend_config
+        self.token = os.environ.get('BLOB_READ_WRITE_TOKEN')
+        self.base_url = os.environ.get('VERCEL_BLOB_BASE_URL', 'https://blob.vercel-storage.com').rstrip('/')
+        self.path_prefix = os.environ.get('VERCEL_BLOB_PATH_PREFIX', '').strip('/')
+        self._last_uploaded_urls = {}
+        self._last_upload_pathnames = {}
+
+    def _blob_path(self, trend_key):
+        path = f"{trend_key}/{self.trend_config[trend_key]['file_name']}"
+        if self.path_prefix:
+            return f"{self.path_prefix}/{path}"
+        return path
+
+    def _blob_url(self, trend_key):
+        return f"{self.base_url}/{self._blob_path(trend_key)}"
+
+    def _read_url(self, request_url):
+        req = urllib_request.Request(
+            request_url,
+            method='GET',
+            headers={'Authorization': f'Bearer {self.token}'},
+        )
+        with urllib_request.urlopen(req, timeout=30) as response:
+            return response.read()
+
+    def _require_token(self):
+        if not self.token:
+            raise RuntimeError('BLOB_READ_WRITE_TOKEN is required for vercel_blob storage backend.')
+
+    def read_trend_csv(self, trend_key):
+        self._require_token()
+        expected_url = self._blob_url(trend_key)
+        try:
+            return self._read_url(expected_url)
+        except urllib_error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+
+        fallback_url = self._last_uploaded_urls.get(trend_key)
+        if fallback_url and fallback_url != expected_url:
+            try:
+                return self._read_url(fallback_url)
+            except urllib_error.HTTPError as exc:
+                if exc.code != 404:
+                    raise
+        return None
+
+    def write_trend_csv(self, trend_key, file_bytes):
+        self._require_token()
+        write_params = {
+            'addRandomSuffix': 'false',
+            'allowOverwrite': 'true',
+            'access': 'public',
+        }
+        request_url = f"{self._blob_url(trend_key)}?{urllib_parse.urlencode(write_params)}"
+        req = urllib_request.Request(
+            request_url,
+            data=file_bytes,
+            method='PUT',
+            headers={
+                'Authorization': f'Bearer {self.token}',
+                'Content-Type': 'text/csv',
+            },
+        )
+        with urllib_request.urlopen(req, timeout=30) as response:
+            body = response.read()
+            if not body:
+                return
+            try:
+                payload = json.loads(body.decode('utf-8'))
+            except Exception:
+                return
+            uploaded_url = payload.get('url')
+            uploaded_pathname = payload.get('pathname')
+            if uploaded_url:
+                self._last_uploaded_urls[trend_key] = uploaded_url
+            if uploaded_pathname:
+                self._last_upload_pathnames[trend_key] = uploaded_pathname
+
+    def debug_target(self, trend_key):
+        expected_path = self._blob_path(trend_key)
+        return {
+            'expected_path': expected_path,
+            'expected_url': self._blob_url(trend_key),
+            'last_uploaded_url': self._last_uploaded_urls.get(trend_key),
+            'last_uploaded_pathname': self._last_upload_pathnames.get(trend_key),
+        }
+
 for trend_key, config in TREND_CONFIG.items():
     data_dir = os.path.join(DATA_ROOT, trend_key)
-    os.makedirs(data_dir, exist_ok=True)
     config['data_dir'] = data_dir
     config['file_path'] = os.path.join(data_dir, config['file_name'])
+    if os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL).strip().lower() == STORAGE_LOCAL:
+        os.makedirs(data_dir, exist_ok=True)
     trend_store[trend_key] = {
         'segments': {},
         'segment_labels': {},
         'error': None,
     }
+
+storage_backend = os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL).strip().lower()
+if storage_backend == STORAGE_VERCEL_BLOB:
+    storage_adapter = VercelBlobStorageAdapter(TREND_CONFIG)
+else:
+    storage_adapter = LocalFileStorageAdapter(TREND_CONFIG)
 
 # =============================================================================
 # === Final Trend Showdown: Legacy RMLA Only ===
@@ -57,7 +191,7 @@ for trend_key, config in TREND_CONFIG.items():
 
 # --- Re-usable functions ---
 
-def load_and_prepare_data(file_path, value_column, segment_column=None):
+def load_and_prepare_data(csv_bytes, value_column, segment_column=None):
     """
     Loads and cleans the base data for a given trend.
     This function reads a CSV, renames the primary value column,
@@ -65,12 +199,14 @@ def load_and_prepare_data(file_path, value_column, segment_column=None):
     for both overall and segmented analysis.
     """
     try:
-        df = pd.read_csv(file_path, parse_dates=['date'])
+        if csv_bytes is None:
+            return None, {}
+        df = pd.read_csv(BytesIO(csv_bytes), parse_dates=['date'])
     except FileNotFoundError:
         return None, {}
 
     if value_column not in df.columns:
-        raise ValueError(f"Expected column '{value_column}' in {file_path}")
+        raise ValueError(f"Expected column '{value_column}' in uploaded data")
 
     df = df.rename(columns={value_column: 'collection'})
     df['collection'] = pd.to_numeric(df['collection'], errors='coerce').fillna(0)
@@ -150,13 +286,28 @@ def refresh_trend_data(trend_key):
     context['error'] = None
 
     try:
+        csv_bytes = storage_adapter.read_trend_csv(trend_key)
         overall_df, segment_frames = load_and_prepare_data(
-            config['file_path'],
+            csv_bytes,
             config['value_column'],
             segment_column,
         )
     except ValueError as exc:
         error_message = str(exc)
+        context['segments']['__all__'] = {
+            'base_df': None,
+            'legacy_df': None,
+            'monthly_totals': None,
+            'latest_period': None,
+            'error': error_message,
+        }
+        context['segment_labels']['__all__'] = config.get(
+            'all_segment_label', config['metric_label']
+        )
+        context['error'] = error_message
+        return
+    except Exception as exc:
+        error_message = f"Unable to load data: {exc}"
         context['segments']['__all__'] = {
             'base_df': None,
             'legacy_df': None,
@@ -273,6 +424,34 @@ def get_segment_context(trend_key, segment_key=None):
     return segment_context
 
 
+def get_required_min_period(now_utc=None):
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    current_period = pd.Period(now_utc.strftime('%Y-%m'), freq='M')
+    return current_period - 1
+
+
+def get_data_status_for_trend(trend_key, now_utc=None):
+    segment_context = get_segment_context(trend_key, '__all__')
+    latest_period_str = segment_context.get('latest_period') if segment_context else None
+    required_min_period = get_required_min_period(now_utc)
+
+    latest_period = None
+    is_stale = True
+    if latest_period_str:
+        try:
+            latest_period = pd.Period(latest_period_str, freq='M')
+            is_stale = latest_period < required_min_period
+        except Exception:
+            is_stale = True
+
+    return {
+        'latest_period': str(latest_period) if latest_period is not None else latest_period_str,
+        'required_min_period': str(required_min_period),
+        'is_stale': bool(is_stale),
+    }
+
+
 for trend in TREND_CONFIG:
     refresh_trend_data(trend)
 
@@ -285,6 +464,11 @@ def inject_trend_context():
     selected_segment_key = None
     selected_segment_label = None
     latest_period = None
+    data_status = {
+        'latest_period': None,
+        'required_min_period': str(get_required_min_period()),
+        'is_stale': False,
+    }
 
     if config and trend_key is not None:
         context = get_trend_context(trend_key)
@@ -296,6 +480,7 @@ def inject_trend_context():
         segment_context = get_segment_context(trend_key, selected_segment_key)
         if segment_context:
             latest_period = segment_context.get('latest_period')
+        data_status = get_data_status_for_trend(trend_key)
 
     return {
         'selected_trend_key': trend_key,
@@ -306,6 +491,9 @@ def inject_trend_context():
         'selected_segment_label': selected_segment_label,
         'segment_options': segment_options,
         'trend_options': TREND_CONFIG,
+        'selected_trend_data_latest_period': data_status.get('latest_period'),
+        'selected_trend_required_min_period': data_status.get('required_min_period'),
+        'selected_trend_data_is_stale': data_status.get('is_stale', False),
     }
 
 @app.route('/')
@@ -367,6 +555,14 @@ def select_segment():
     if not next_page or not str(next_page).startswith('/'):
         next_page = url_for('live_trend')
     return redirect(next_page)
+
+
+@app.route('/api/data_status', methods=['GET'])
+def api_data_status():
+    trend_key = get_selected_trend_key()
+    if trend_key is None:
+        return jsonify({'error': 'Select a trend first.'}), 400
+    return jsonify(get_data_status_for_trend(trend_key))
 
 @app.route('/api/live_trend', methods=['POST'])
 def api_live_trend():
@@ -629,12 +825,27 @@ def api_upload():
         if not uploaded_file:
             return jsonify({'error': 'No file provided'}), 400
 
-        file_path = config['file_path']
-        uploaded_file.save(file_path)
+        file_bytes = uploaded_file.read()
+        if not file_bytes:
+            return jsonify({'error': 'Uploaded file is empty'}), 400
+
+        storage_adapter.write_trend_csv(trend_key, file_bytes)
 
         refresh_trend_data(trend_key)
         context = get_trend_context(trend_key)
         if context.get('error'):
+            if isinstance(storage_adapter, VercelBlobStorageAdapter):
+                debug = storage_adapter.debug_target(trend_key)
+                if context['error'] == 'Data file not found':
+                    return jsonify({
+                        'error': (
+                            'Data file not found after upload. '
+                            f"expected_path={debug.get('expected_path')} "
+                            f"expected_url={debug.get('expected_url')} "
+                            f"last_uploaded_pathname={debug.get('last_uploaded_pathname')} "
+                            f"last_uploaded_url={debug.get('last_uploaded_url')}"
+                        )
+                    }), 400
             return jsonify({'error': context['error']}), 400
 
         # Ensure the selected segment is still valid after refresh
