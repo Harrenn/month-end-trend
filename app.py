@@ -116,7 +116,9 @@ class VercelBlobStorageAdapter(StorageAdapter):
     def __init__(self, trend_config):
         self.trend_config = trend_config
         self.token = os.environ.get('BLOB_READ_WRITE_TOKEN')
-        self.base_url = os.environ.get('VERCEL_BLOB_BASE_URL', 'https://blob.vercel-storage.com').rstrip('/')
+        base_url_env = os.environ.get('VERCEL_BLOB_BASE_URL', '').strip()
+        self.base_url_from_env = bool(base_url_env)
+        self.base_url = (base_url_env or 'https://blob.vercel-storage.com').rstrip('/')
         self.path_prefix = os.environ.get('VERCEL_BLOB_PATH_PREFIX', '').strip('/')
         self._last_uploaded_urls = {}
         self._last_upload_pathnames = {}
@@ -129,6 +131,24 @@ class VercelBlobStorageAdapter(StorageAdapter):
 
     def _blob_url(self, trend_key):
         return f"{self.base_url}/{self._blob_path(trend_key)}"
+
+    def _base_url_from_blob_url(self, blob_url):
+        try:
+            parsed = urllib_parse.urlparse(blob_url)
+        except Exception:
+            return None
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _maybe_update_base_url_from_blob_url(self, blob_url):
+        discovered_base_url = self._base_url_from_blob_url(blob_url)
+        if not discovered_base_url:
+            return
+        if self.base_url_from_env:
+            return
+        if discovered_base_url != self.base_url:
+            self.base_url = discovered_base_url
 
     def _read_url(self, request_url):
         req = urllib_request.Request(
@@ -151,6 +171,16 @@ class VercelBlobStorageAdapter(StorageAdapter):
         except urllib_error.HTTPError as exc:
             if exc.code != 404:
                 raise
+
+        fallback_url = self._last_uploaded_urls.get(trend_key)
+        if fallback_url:
+            try:
+                fallback_bytes = self._read_url(fallback_url)
+                self._maybe_update_base_url_from_blob_url(fallback_url)
+                return fallback_bytes
+            except urllib_error.HTTPError as exc:
+                if exc.code != 404:
+                    raise
         return None
 
     def write_trend_csv(self, trend_key, file_bytes):
@@ -183,6 +213,7 @@ class VercelBlobStorageAdapter(StorageAdapter):
             uploaded_pathname = payload.get('pathname')
             if uploaded_url:
                 self._last_uploaded_urls[trend_key] = uploaded_url
+                self._maybe_update_base_url_from_blob_url(uploaded_url)
             if uploaded_pathname:
                 normalized_uploaded_path = str(uploaded_pathname).lstrip('/')
                 if not normalized_uploaded_path.endswith(expected_path):
@@ -198,6 +229,8 @@ class VercelBlobStorageAdapter(StorageAdapter):
         return {
             'expected_path': expected_path,
             'expected_url': self._blob_url(trend_key),
+            'base_url': self.base_url,
+            'base_url_from_env': self.base_url_from_env,
             'last_uploaded_url': self._last_uploaded_urls.get(trend_key),
             'last_uploaded_pathname': self._last_upload_pathnames.get(trend_key),
         }
@@ -249,6 +282,16 @@ app.logger.info(
     deployment_env,
     blob_prefix,
 )
+if (
+    storage_backend == STORAGE_VERCEL_BLOB
+    and isinstance(storage_adapter, VercelBlobStorageAdapter)
+    and not storage_adapter.base_url_from_env
+):
+    app.logger.warning(
+        "VERCEL_BLOB_BASE_URL is not set; using generic blob URL fallback (%s). "
+        "If reads fail after upload, set VERCEL_BLOB_BASE_URL to your store host.",
+        storage_adapter.base_url,
+    )
 
 # =============================================================================
 # === Final Trend Showdown: Legacy RMLA Only ===
@@ -1014,6 +1057,16 @@ def api_upload():
             if isinstance(storage_adapter, VercelBlobStorageAdapter):
                 debug = storage_adapter.debug_target(trend_key)
                 if context['error'] == 'Data file not found':
+                    host_hint = ''
+                    expected_url = debug.get('expected_url') or ''
+                    uploaded_url = debug.get('last_uploaded_url') or ''
+                    expected_host = urllib_parse.urlparse(expected_url).netloc if expected_url else ''
+                    uploaded_host = urllib_parse.urlparse(uploaded_url).netloc if uploaded_url else ''
+                    if expected_host and uploaded_host and expected_host != uploaded_host:
+                        host_hint = (
+                            f" host_mismatch expected_host={expected_host} uploaded_host={uploaded_host}. "
+                            f"Set VERCEL_BLOB_BASE_URL=https://{uploaded_host} and redeploy."
+                        )
                     return jsonify({
                         'error': (
                             f"{build_data_missing_message(trend_key)} after upload. "
@@ -1021,6 +1074,7 @@ def api_upload():
                             f"expected_url={debug.get('expected_url')} "
                             f"last_uploaded_pathname={debug.get('last_uploaded_pathname')} "
                             f"last_uploaded_url={debug.get('last_uploaded_url')}"
+                            f"{host_hint}"
                         )
                     }), 400
             return jsonify({'error': contextualize_error_message(trend_key, context['error'])}), 400
