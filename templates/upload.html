@@ -15,7 +15,7 @@
                 {% if selected_trend_latest_period %}
                 <div class="alert alert-info py-2">Latest data month: <strong>{{ selected_trend_latest_period }}</strong>. Upload a newer file to keep the trend up to date.</div>
                 {% else %}
-                <div class="alert alert-warning py-2">No data found for this trend yet. Upload a CSV to get started.</div>
+                <div class="alert alert-warning py-2">No data found for trend key <code>{{ selected_trend_key or 'unknown' }}</code> yet. Upload a CSV to get started.</div>
                 {% endif %}
                 <form id="upload-form" enctype="multipart/form-data">
                     <div class="mb-3">

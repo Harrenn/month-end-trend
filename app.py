@@ -49,11 +49,41 @@ TREND_CONFIG = {
 trend_store = {}
 
 
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_storage_observability():
+    return {
+        'last_read_at': None,
+        'last_read_status': 'unknown',
+        'last_read_bytes': None,
+        'last_upload_at': None,
+        'last_upload_bytes': None,
+        'last_error': None,
+    }
+
+
+def ensure_storage_observability(context):
+    observability = context.get('storage_observability')
+    if not isinstance(observability, dict):
+        observability = new_storage_observability()
+        context['storage_observability'] = observability
+
+    defaults = new_storage_observability()
+    for key, value in defaults.items():
+        observability.setdefault(key, value)
+    return observability
+
+
 class StorageAdapter:
     def read_trend_csv(self, trend_key):
         raise NotImplementedError
 
     def write_trend_csv(self, trend_key, file_bytes):
+        raise NotImplementedError
+
+    def storage_target(self, trend_key):
         raise NotImplementedError
 
 
@@ -74,6 +104,12 @@ class LocalFileStorageAdapter(StorageAdapter):
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, 'wb') as handle:
             handle.write(file_bytes)
+
+    def storage_target(self, trend_key):
+        return {
+            'type': STORAGE_LOCAL,
+            'path': self.trend_config[trend_key]['file_path'],
+        }
 
 
 class VercelBlobStorageAdapter(StorageAdapter):
@@ -115,18 +151,11 @@ class VercelBlobStorageAdapter(StorageAdapter):
         except urllib_error.HTTPError as exc:
             if exc.code != 404:
                 raise
-
-        fallback_url = self._last_uploaded_urls.get(trend_key)
-        if fallback_url and fallback_url != expected_url:
-            try:
-                return self._read_url(fallback_url)
-            except urllib_error.HTTPError as exc:
-                if exc.code != 404:
-                    raise
         return None
 
     def write_trend_csv(self, trend_key, file_bytes):
         self._require_token()
+        expected_path = self._blob_path(trend_key).lstrip('/')
         write_params = {
             'addRandomSuffix': 'false',
             'allowOverwrite': 'true',
@@ -155,6 +184,13 @@ class VercelBlobStorageAdapter(StorageAdapter):
             if uploaded_url:
                 self._last_uploaded_urls[trend_key] = uploaded_url
             if uploaded_pathname:
+                normalized_uploaded_path = str(uploaded_pathname).lstrip('/')
+                if not normalized_uploaded_path.endswith(expected_path):
+                    raise RuntimeError(
+                        f"Blob upload path mismatch: expected={expected_path} "
+                        f"got={normalized_uploaded_path}. "
+                        "Check STORAGE_BACKEND/VERCEL_BLOB_BASE_URL/VERCEL_BLOB_PATH_PREFIX."
+                    )
                 self._last_upload_pathnames[trend_key] = uploaded_pathname
 
     def debug_target(self, trend_key):
@@ -166,23 +202,53 @@ class VercelBlobStorageAdapter(StorageAdapter):
             'last_uploaded_pathname': self._last_upload_pathnames.get(trend_key),
         }
 
+    def storage_target(self, trend_key):
+        return {
+            'type': STORAGE_VERCEL_BLOB,
+            **self.debug_target(trend_key),
+        }
+
+
+def resolve_storage_backend(raw_backend):
+    return (raw_backend or STORAGE_LOCAL).strip().lower()
+
+
+def create_storage_adapter(raw_backend, trend_config):
+    resolved_backend = resolve_storage_backend(raw_backend)
+    if resolved_backend == STORAGE_VERCEL_BLOB:
+        adapter = VercelBlobStorageAdapter(trend_config)
+        if not adapter.token:
+            raise RuntimeError(
+                "STORAGE_BACKEND is set to 'vercel_blob' but BLOB_READ_WRITE_TOKEN is missing."
+            )
+        return resolved_backend, adapter
+    return STORAGE_LOCAL, LocalFileStorageAdapter(trend_config)
+
 for trend_key, config in TREND_CONFIG.items():
     data_dir = os.path.join(DATA_ROOT, trend_key)
     config['data_dir'] = data_dir
     config['file_path'] = os.path.join(data_dir, config['file_name'])
-    if os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL).strip().lower() == STORAGE_LOCAL:
+    if resolve_storage_backend(os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL)) == STORAGE_LOCAL:
         os.makedirs(data_dir, exist_ok=True)
     trend_store[trend_key] = {
         'segments': {},
         'segment_labels': {},
         'error': None,
+        'storage_observability': new_storage_observability(),
     }
 
-storage_backend = os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL).strip().lower()
-if storage_backend == STORAGE_VERCEL_BLOB:
-    storage_adapter = VercelBlobStorageAdapter(TREND_CONFIG)
-else:
-    storage_adapter = LocalFileStorageAdapter(TREND_CONFIG)
+storage_backend, storage_adapter = create_storage_adapter(
+    os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL),
+    TREND_CONFIG,
+)
+deployment_env = os.environ.get('VERCEL_ENV') or os.environ.get('FLASK_ENV') or 'local'
+blob_prefix = os.environ.get('VERCEL_BLOB_PATH_PREFIX', '').strip('/') or '(none)'
+app.logger.info(
+    "Storage backend configured backend=%s env=%s blob_prefix=%s",
+    storage_backend,
+    deployment_env,
+    blob_prefix,
+)
 
 # =============================================================================
 # === Final Trend Showdown: Legacy RMLA Only ===
@@ -308,6 +374,7 @@ def refresh_trend_data(trend_key):
     """
     config = TREND_CONFIG[trend_key]
     context = trend_store.setdefault(trend_key, {})
+    observability = ensure_storage_observability(context)
     segment_column = config.get('segment_column')
 
     context['segments'] = {}
@@ -316,6 +383,10 @@ def refresh_trend_data(trend_key):
 
     try:
         csv_bytes = storage_adapter.read_trend_csv(trend_key)
+        observability['last_read_at'] = utc_now_iso()
+        observability['last_read_status'] = 'found' if csv_bytes is not None else 'not_found'
+        observability['last_read_bytes'] = len(csv_bytes) if csv_bytes is not None else 0
+        observability['last_error'] = None
         overall_df, segment_frames = load_and_prepare_data(
             csv_bytes,
             config['value_column'],
@@ -323,6 +394,9 @@ def refresh_trend_data(trend_key):
         )
     except ValueError as exc:
         error_message = str(exc)
+        observability['last_read_at'] = utc_now_iso()
+        observability['last_read_status'] = 'error'
+        observability['last_error'] = error_message
         context['segments']['__all__'] = {
             'base_df': None,
             'legacy_df': None,
@@ -337,6 +411,9 @@ def refresh_trend_data(trend_key):
         return
     except Exception as exc:
         error_message = f"Unable to load data: {exc}"
+        observability['last_read_at'] = utc_now_iso()
+        observability['last_read_status'] = 'error'
+        observability['last_error'] = error_message
         context['segments']['__all__'] = {
             'base_df': None,
             'legacy_df': None,
@@ -352,6 +429,7 @@ def refresh_trend_data(trend_key):
 
     if overall_df is None:
         error_message = 'Data file not found'
+        observability['last_error'] = error_message
         context['segments']['__all__'] = {
             'base_df': None,
             'legacy_df': None,
@@ -413,6 +491,11 @@ def refresh_trend_data(trend_key):
 
 def get_trend_context(trend_key):
     return trend_store.get(trend_key, {})
+
+
+def sync_trend_data(trend_key):
+    if trend_key in TREND_CONFIG:
+        refresh_trend_data(trend_key)
 
 
 def get_selected_trend_key():
@@ -481,6 +564,24 @@ def get_data_status_for_trend(trend_key, now_utc=None):
     }
 
 
+def get_storage_observability(trend_key):
+    context = get_trend_context(trend_key)
+    return ensure_storage_observability(context)
+
+
+def build_data_missing_message(trend_key):
+    return (
+        "No data found for this trend. "
+        f"trend={trend_key} backend={storage_backend}"
+    )
+
+
+def contextualize_error_message(trend_key, error_message):
+    if error_message == 'Data file not found':
+        return build_data_missing_message(trend_key)
+    return error_message
+
+
 for trend in TREND_CONFIG:
     refresh_trend_data(trend)
 
@@ -500,6 +601,7 @@ def inject_trend_context():
     }
 
     if config and trend_key is not None:
+        sync_trend_data(trend_key)
         context = get_trend_context(trend_key)
         segment_options = context.get('segment_labels', {}) or {
             '__all__': config['metric_label']
@@ -573,6 +675,7 @@ def select_segment():
     if trend_key is None:
         return redirect(url_for('index'))
 
+    sync_trend_data(trend_key)
     segment = request.form.get('segment', '__all__')
     available_segments = get_available_segments(trend_key)
     if segment not in available_segments:
@@ -591,7 +694,44 @@ def api_data_status():
     trend_key = get_selected_trend_key()
     if trend_key is None:
         return jsonify({'error': 'Select a trend first.'}), 400
-    return jsonify(get_data_status_for_trend(trend_key))
+    sync_trend_data(trend_key)
+    status_payload = get_data_status_for_trend(trend_key)
+    context = get_trend_context(trend_key)
+    if context.get('error') == 'Data file not found':
+        status_payload['error'] = build_data_missing_message(trend_key)
+    return jsonify(status_payload)
+
+
+@app.route('/api/storage_health', methods=['GET'])
+def api_storage_health():
+    trend_key = request.args.get('trend', '').strip() or get_selected_trend_key()
+    if trend_key not in TREND_CONFIG:
+        return jsonify({
+            'error': "Provide a valid trend query parameter: 'collection' or 'releases'.",
+        }), 400
+
+    sync_trend_data(trend_key)
+    context = get_trend_context(trend_key)
+    segment_context = get_segment_context(trend_key, '__all__') or {}
+    observability = get_storage_observability(trend_key)
+    data_status = get_data_status_for_trend(trend_key)
+
+    return jsonify({
+        'backend': storage_backend,
+        'trend': trend_key,
+        'selected_trend': get_selected_trend_key(),
+        'selected_segment': session.get('selected_segment', '__all__'),
+        'read_status': observability.get('last_read_status'),
+        'latest_period': segment_context.get('latest_period'),
+        'required_min_period': data_status.get('required_min_period'),
+        'is_stale': data_status.get('is_stale'),
+        'context_error': contextualize_error_message(trend_key, context.get('error')),
+        'storage_target': storage_adapter.storage_target(trend_key),
+        'last_read_at': observability.get('last_read_at'),
+        'last_read_bytes': observability.get('last_read_bytes'),
+        'last_upload_at': observability.get('last_upload_at'),
+        'last_upload_bytes': observability.get('last_upload_bytes'),
+    })
 
 @app.route('/api/live_trend', methods=['POST'])
 def api_live_trend():
@@ -599,13 +739,15 @@ def api_live_trend():
     if trend_key is None:
         return jsonify({'error': 'Select a trend before generating a live trend.'}), 400
 
+    sync_trend_data(trend_key)
     context = get_trend_context(trend_key)
     if context.get('error'):
-        return jsonify({'error': context['error']}), 400
+        return jsonify({'error': contextualize_error_message(trend_key, context['error'])}), 400
 
     segment_context = get_segment_context(trend_key)
     if segment_context is None or segment_context.get('error'):
         error_msg = segment_context.get('error') if segment_context else 'Data not available for the selected segment.'
+        error_msg = contextualize_error_message(trend_key, error_msg)
         return jsonify({'error': error_msg}), 400
 
     legacy_df = segment_context.get('legacy_df')
@@ -699,13 +841,15 @@ def api_backtest():
     if trend_key is None:
         return jsonify({'error': 'Select a trend before running the backtest.'}), 400
 
+    sync_trend_data(trend_key)
     context = get_trend_context(trend_key)
     if context.get('error'):
-        return jsonify({'error': context['error']}), 400
+        return jsonify({'error': contextualize_error_message(trend_key, context['error'])}), 400
 
     segment_context = get_segment_context(trend_key)
     if segment_context is None or segment_context.get('error'):
         error_msg = segment_context.get('error') if segment_context else 'Data not available for the selected segment.'
+        error_msg = contextualize_error_message(trend_key, error_msg)
         return jsonify({'error': error_msg}), 400
 
     legacy_df = segment_context.get('legacy_df')
@@ -859,6 +1003,10 @@ def api_upload():
             return jsonify({'error': 'Uploaded file is empty'}), 400
 
         storage_adapter.write_trend_csv(trend_key, file_bytes)
+        observability = get_storage_observability(trend_key)
+        observability['last_upload_at'] = utc_now_iso()
+        observability['last_upload_bytes'] = len(file_bytes)
+        observability['last_error'] = None
 
         refresh_trend_data(trend_key)
         context = get_trend_context(trend_key)
@@ -868,14 +1016,14 @@ def api_upload():
                 if context['error'] == 'Data file not found':
                     return jsonify({
                         'error': (
-                            'Data file not found after upload. '
+                            f"{build_data_missing_message(trend_key)} after upload. "
                             f"expected_path={debug.get('expected_path')} "
                             f"expected_url={debug.get('expected_url')} "
                             f"last_uploaded_pathname={debug.get('last_uploaded_pathname')} "
                             f"last_uploaded_url={debug.get('last_uploaded_url')}"
                         )
                     }), 400
-            return jsonify({'error': context['error']}), 400
+            return jsonify({'error': contextualize_error_message(trend_key, context['error'])}), 400
 
         # Ensure the selected segment is still valid after refresh
         get_selected_segment_key(trend_key)
@@ -896,13 +1044,15 @@ def api_single_month_backtest():
     if trend_key is None:
         return jsonify({'error': 'Select a trend before running the backtest.'}), 400
 
+    sync_trend_data(trend_key)
     context = get_trend_context(trend_key)
     if context.get('error'):
-        return jsonify({'error': context['error']}), 400
+        return jsonify({'error': contextualize_error_message(trend_key, context['error'])}), 400
 
     segment_context = get_segment_context(trend_key)
     if segment_context is None or segment_context.get('error'):
         error_msg = segment_context.get('error') if segment_context else 'Data not available for the selected segment.'
+        error_msg = contextualize_error_message(trend_key, error_msg)
         return jsonify({'error': error_msg}), 400
 
     legacy_df = segment_context.get('legacy_df')

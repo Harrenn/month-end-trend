@@ -67,3 +67,18 @@ The UI shows a non-blocking reminder when dataset latest month is older than the
 Example on February 16, 2026:
 - Latest month `2025-12` -> stale (reminder shown)
 - Latest month `2026-01` -> fresh (no reminder)
+
+## 8. Persistence verification checklist (production)
+
+Use this after any env var or deployment change:
+
+1. Confirm both users are on the same production URL.
+2. Confirm production env vars include only the required Blob contract:
+   - `STORAGE_BACKEND=vercel_blob`
+   - `BLOB_READ_WRITE_TOKEN`
+   - `FLASK_SECRET_KEY`
+3. Upload one CSV for each trend (`collection`, `releases`).
+4. Check:
+   - `/api/storage_health?trend=collection`
+   - `/api/storage_health?trend=releases`
+5. Verify both endpoints return `read_status: "found"` and expected `storage_target.expected_path`.

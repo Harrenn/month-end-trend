@@ -115,21 +115,28 @@ Storage is configured with `STORAGE_BACKEND`:
 - `local` (default): reads/writes CSVs in `data/...`
 - `vercel_blob`: reads/writes shared CSVs in Vercel Blob storage
 
-For `vercel_blob`, set:
+For `vercel_blob`, required:
 
 - `STORAGE_BACKEND=vercel_blob`
 - `BLOB_READ_WRITE_TOKEN`
+- `FLASK_SECRET_KEY`
 
-Optional:
+Optional advanced overrides (leave unset unless needed):
 
 - `VERCEL_BLOB_BASE_URL` (defaults to `https://blob.vercel-storage.com`)
 - `VERCEL_BLOB_PATH_PREFIX` (namespace prefix)
+
+Shared blob keys are deterministic:
+
+- `collection/collection_data.csv`
+- `releases/releases_data.csv`
 
 ## API endpoints
 
 Most API endpoints require a selected trend stored in session. In browser flows this is set by `POST /select_trend`.
 
 - `GET /api/data_status`
+- `GET /api/storage_health?trend=collection|releases`
 - `POST /api/live_trend`
 - `POST /api/backtest`
 - `POST /api/single_month_backtest`
