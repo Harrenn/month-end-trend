@@ -8,7 +8,7 @@ Flask web app for month-end trend estimation and backtesting using a Legacy RMLA
 - `collection` using `collection_data.csv`
 - `releases` using `releases_data.csv` (with optional `loan_type` segmentation)
 - Lets users:
-- Upload CSV data
+- Upload CSV or Excel data (`.csv`, `.xlsx`, `.xls`)
 - Generate live month-end trend projections from current MTD values
 - Run multi-month backtests
 - Run single-calendar-month backtests across years
@@ -74,7 +74,7 @@ python -m unittest discover -s tests
 
 ## Data format requirements
 
-### Collection trend CSV
+### Collection trend file (CSV or Excel)
 
 Required columns:
 
@@ -89,7 +89,7 @@ date,collection
 2026-01-30,9226222.34
 ```
 
-### Releases trend CSV
+### Releases trend file (CSV or Excel)
 
 Required columns:
 
@@ -121,9 +121,12 @@ For `vercel_blob`, required:
 - `BLOB_READ_WRITE_TOKEN`
 - `FLASK_SECRET_KEY`
 
+Required in production (`VERCEL_ENV=production`):
+
+- `VERCEL_BLOB_BASE_URL`
+
 Optional advanced overrides (leave unset unless needed):
 
-- `VERCEL_BLOB_BASE_URL` (defaults to `https://blob.vercel-storage.com`)
 - `VERCEL_BLOB_PATH_PREFIX` (namespace prefix)
 
 Shared blob keys are deterministic:

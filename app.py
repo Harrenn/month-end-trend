@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from datetime import datetime, timezone
 from io import BytesIO
 from urllib import error as urllib_error
@@ -117,11 +118,15 @@ class VercelBlobStorageAdapter(StorageAdapter):
         self.trend_config = trend_config
         self.token = os.environ.get('BLOB_READ_WRITE_TOKEN')
         base_url_env = os.environ.get('VERCEL_BLOB_BASE_URL', '').strip()
+        if base_url_env and not base_url_env.startswith(('http://', 'https://')):
+            base_url_env = f"https://{base_url_env}"
         self.base_url_from_env = bool(base_url_env)
         self.base_url = (base_url_env or 'https://blob.vercel-storage.com').rstrip('/')
+        self.write_base_url = 'https://blob.vercel-storage.com'
         self.path_prefix = os.environ.get('VERCEL_BLOB_PATH_PREFIX', '').strip('/')
         self._last_uploaded_urls = {}
         self._last_upload_pathnames = {}
+        self._last_resolved_urls = {}
 
     def _blob_path(self, trend_key):
         path = f"{trend_key}/{self.trend_config[trend_key]['file_name']}"
@@ -132,32 +137,97 @@ class VercelBlobStorageAdapter(StorageAdapter):
     def _blob_url(self, trend_key):
         return f"{self.base_url}/{self._blob_path(trend_key)}"
 
-    def _base_url_from_blob_url(self, blob_url):
-        try:
-            parsed = urllib_parse.urlparse(blob_url)
-        except Exception:
-            return None
-        if not parsed.scheme or not parsed.netloc:
-            return None
-        return f"{parsed.scheme}://{parsed.netloc}"
+    def _blob_write_url(self, trend_key):
+        return f"{self.write_base_url}/{self._blob_path(trend_key)}"
 
-    def _maybe_update_base_url_from_blob_url(self, blob_url):
-        discovered_base_url = self._base_url_from_blob_url(blob_url)
-        if not discovered_base_url:
-            return
-        if self.base_url_from_env:
-            return
-        if discovered_base_url != self.base_url:
-            self.base_url = discovered_base_url
+    def _request_bytes(self, req, timeout=30, retries=2):
+        for attempt in range(retries + 1):
+            try:
+                with urllib_request.urlopen(req, timeout=timeout) as response:
+                    return response.read()
+            except urllib_error.HTTPError as exc:
+                if exc.code in {429, 500, 502, 503, 504} and attempt < retries:
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
+                raise
+            except urllib_error.URLError:
+                if attempt < retries:
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
+                raise
+        return b''
 
-    def _read_url(self, request_url):
+    def _list_blobs(self, prefix, limit=100):
+        query = urllib_parse.urlencode({
+            'prefix': prefix,
+            'limit': limit,
+        })
+        list_url = f"{self.write_base_url}?{query}"
         req = urllib_request.Request(
-            request_url,
+            list_url,
             method='GET',
             headers={'Authorization': f'Bearer {self.token}'},
         )
-        with urllib_request.urlopen(req, timeout=30) as response:
-            return response.read()
+        try:
+            body = self._request_bytes(req)
+        except urllib_error.HTTPError as exc:
+            if exc.code == 404:
+                return []
+            raise
+        try:
+            payload = json.loads(body.decode('utf-8'))
+        except Exception:
+            return []
+        blobs = payload.get('blobs')
+        return blobs if isinstance(blobs, list) else []
+
+    def _resolve_blob_url_for_path(self, blob_path):
+        normalized_expected = str(blob_path).lstrip('/')
+        parent_dir, _, file_name = normalized_expected.rpartition('/')
+        stem, ext = os.path.splitext(file_name)
+        prefix = f"{parent_dir}/{stem}" if parent_dir else stem
+
+        candidates = []
+        for item in self._list_blobs(prefix):
+            pathname = str(item.get('pathname') or item.get('path') or '').lstrip('/')
+            if not pathname:
+                continue
+
+            item_parent, _, item_file = pathname.rpartition('/')
+            if item_parent != parent_dir:
+                continue
+
+            is_exact = pathname == normalized_expected
+            is_suffix_variant = (
+                item_file.startswith(f"{stem}-")
+                and item_file.endswith(ext)
+            )
+            if not is_exact and not is_suffix_variant:
+                continue
+
+            blob_url = item.get('url')
+            if not blob_url:
+                continue
+
+            uploaded_at = str(item.get('uploadedAt') or item.get('uploaded_at') or '')
+            candidates.append({
+                'uploaded_at': uploaded_at,
+                'is_exact': is_exact,
+                'url': str(blob_url),
+            })
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda c: (c['uploaded_at'], c['is_exact']), reverse=True)
+        return candidates[0]['url']
+
+    def _download_blob_url(self, blob_url):
+        req = urllib_request.Request(
+            blob_url,
+            method='GET',
+        )
+        return self._request_bytes(req)
 
     def _require_token(self):
         if not self.token:
@@ -165,33 +235,28 @@ class VercelBlobStorageAdapter(StorageAdapter):
 
     def read_trend_csv(self, trend_key):
         self._require_token()
-        expected_url = self._blob_url(trend_key)
+        expected_path = self._blob_path(trend_key).lstrip('/')
+        resolved_url = self._resolve_blob_url_for_path(expected_path)
+        if not resolved_url:
+            self._last_resolved_urls[trend_key] = None
+            return None
+        self._last_resolved_urls[trend_key] = resolved_url
         try:
-            return self._read_url(expected_url)
+            return self._download_blob_url(resolved_url)
         except urllib_error.HTTPError as exc:
             if exc.code != 404:
                 raise
-
-        fallback_url = self._last_uploaded_urls.get(trend_key)
-        if fallback_url:
-            try:
-                fallback_bytes = self._read_url(fallback_url)
-                self._maybe_update_base_url_from_blob_url(fallback_url)
-                return fallback_bytes
-            except urllib_error.HTTPError as exc:
-                if exc.code != 404:
-                    raise
         return None
 
     def write_trend_csv(self, trend_key, file_bytes):
         self._require_token()
         expected_path = self._blob_path(trend_key).lstrip('/')
         write_params = {
-            'addRandomSuffix': 'false',
             'allowOverwrite': 'true',
+            'addRandomSuffix': 'false',
             'access': 'public',
         }
-        request_url = f"{self._blob_url(trend_key)}?{urllib_parse.urlencode(write_params)}"
+        request_url = f"{self._blob_write_url(trend_key)}?{urllib_parse.urlencode(write_params)}"
         req = urllib_request.Request(
             request_url,
             data=file_bytes,
@@ -199,38 +264,41 @@ class VercelBlobStorageAdapter(StorageAdapter):
             headers={
                 'Authorization': f'Bearer {self.token}',
                 'Content-Type': 'text/csv',
+                'x-add-random-suffix': '0',
+                'x-allow-overwrite': '1',
             },
         )
-        with urllib_request.urlopen(req, timeout=30) as response:
-            body = response.read()
-            if not body:
-                return
-            try:
-                payload = json.loads(body.decode('utf-8'))
-            except Exception:
-                return
-            uploaded_url = payload.get('url')
-            uploaded_pathname = payload.get('pathname')
-            if uploaded_url:
-                self._last_uploaded_urls[trend_key] = uploaded_url
-                self._maybe_update_base_url_from_blob_url(uploaded_url)
-            if uploaded_pathname:
-                normalized_uploaded_path = str(uploaded_pathname).lstrip('/')
-                if not normalized_uploaded_path.endswith(expected_path):
-                    raise RuntimeError(
-                        f"Blob upload path mismatch: expected={expected_path} "
-                        f"got={normalized_uploaded_path}. "
-                        "Check STORAGE_BACKEND/VERCEL_BLOB_BASE_URL/VERCEL_BLOB_PATH_PREFIX."
-                    )
-                self._last_upload_pathnames[trend_key] = uploaded_pathname
+        body = self._request_bytes(req)
+        if not body:
+            return
+        try:
+            payload = json.loads(body.decode('utf-8'))
+        except Exception:
+            return
+        uploaded_url = payload.get('url')
+        uploaded_pathname = payload.get('pathname')
+        if uploaded_url:
+            self._last_uploaded_urls[trend_key] = uploaded_url
+        if uploaded_pathname:
+            normalized_uploaded_path = str(uploaded_pathname).lstrip('/')
+            if normalized_uploaded_path != expected_path:
+                raise RuntimeError(
+                    f"Blob upload path mismatch: expected={expected_path} "
+                    f"got={normalized_uploaded_path}. "
+                    "Check STORAGE_BACKEND/VERCEL_BLOB_BASE_URL/VERCEL_BLOB_PATH_PREFIX."
+                )
+            self._last_upload_pathnames[trend_key] = uploaded_pathname
 
     def debug_target(self, trend_key):
         expected_path = self._blob_path(trend_key)
         return {
             'expected_path': expected_path,
             'expected_url': self._blob_url(trend_key),
+            'write_url': self._blob_write_url(trend_key),
             'base_url': self.base_url,
+            'write_base_url': self.write_base_url,
             'base_url_from_env': self.base_url_from_env,
+            'last_resolved_url': self._last_resolved_urls.get(trend_key),
             'last_uploaded_url': self._last_uploaded_urls.get(trend_key),
             'last_uploaded_pathname': self._last_upload_pathnames.get(trend_key),
         }
@@ -246,13 +314,18 @@ def resolve_storage_backend(raw_backend):
     return (raw_backend or STORAGE_LOCAL).strip().lower()
 
 
-def create_storage_adapter(raw_backend, trend_config):
+def create_storage_adapter(raw_backend, trend_config, deployment_env='local'):
     resolved_backend = resolve_storage_backend(raw_backend)
     if resolved_backend == STORAGE_VERCEL_BLOB:
         adapter = VercelBlobStorageAdapter(trend_config)
         if not adapter.token:
             raise RuntimeError(
                 "STORAGE_BACKEND is set to 'vercel_blob' but BLOB_READ_WRITE_TOKEN is missing."
+            )
+        if str(deployment_env or '').lower() == 'production' and not adapter.base_url_from_env:
+            raise RuntimeError(
+                "STORAGE_BACKEND is set to 'vercel_blob' in production but "
+                "VERCEL_BLOB_BASE_URL is missing."
             )
         return resolved_backend, adapter
     return STORAGE_LOCAL, LocalFileStorageAdapter(trend_config)
@@ -270,17 +343,24 @@ for trend_key, config in TREND_CONFIG.items():
         'storage_observability': new_storage_observability(),
     }
 
+deployment_env = os.environ.get('VERCEL_ENV') or os.environ.get('FLASK_ENV') or 'local'
 storage_backend, storage_adapter = create_storage_adapter(
     os.environ.get('STORAGE_BACKEND', STORAGE_LOCAL),
     TREND_CONFIG,
+    deployment_env=deployment_env,
 )
-deployment_env = os.environ.get('VERCEL_ENV') or os.environ.get('FLASK_ENV') or 'local'
 blob_prefix = os.environ.get('VERCEL_BLOB_PATH_PREFIX', '').strip('/') or '(none)'
+blob_base_url = (
+    storage_adapter.base_url
+    if storage_backend == STORAGE_VERCEL_BLOB and isinstance(storage_adapter, VercelBlobStorageAdapter)
+    else '(n/a)'
+)
 app.logger.info(
-    "Storage backend configured backend=%s env=%s blob_prefix=%s",
+    "Storage backend configured backend=%s env=%s blob_prefix=%s blob_base_url=%s",
     storage_backend,
     deployment_env,
     blob_prefix,
+    blob_base_url,
 )
 if (
     storage_backend == STORAGE_VERCEL_BLOB
@@ -288,7 +368,7 @@ if (
     and not storage_adapter.base_url_from_env
 ):
     app.logger.warning(
-        "VERCEL_BLOB_BASE_URL is not set; using generic blob URL fallback (%s). "
+        "VERCEL_BLOB_BASE_URL is not set; using generic blob URL default (%s). "
         "If reads fail after upload, set VERCEL_BLOB_BASE_URL to your store host.",
         storage_adapter.base_url,
     )
@@ -300,22 +380,94 @@ if (
 
 # --- Re-usable functions ---
 
-def load_and_prepare_data(csv_bytes, value_column, segment_column=None):
+EXCEL_EXTENSIONS = {'.xlsx', '.xls'}
+
+
+def _file_extension(filename):
+    filename = str(filename or '').strip().lower()
+    _, ext = os.path.splitext(filename)
+    return ext
+
+
+def _looks_like_excel(file_bytes):
+    if not file_bytes:
+        return False
+    return file_bytes.startswith(b'PK\x03\x04') or file_bytes.startswith(b'\xd0\xcf\x11\xe0')
+
+
+def _read_csv_dataframe(file_bytes):
+    # Auto-detect separators so CSV exports with semicolons still parse.
+    return pd.read_csv(BytesIO(file_bytes), sep=None, engine='python')
+
+
+def _read_excel_dataframe(file_bytes):
+    # Try engines in compatibility order for .xlsx/.xls.
+    errors = []
+    for engine in ('openpyxl', 'xlrd', None):
+        kwargs = {'sheet_name': 0}
+        if engine is not None:
+            kwargs['engine'] = engine
+        try:
+            return pd.read_excel(BytesIO(file_bytes), **kwargs)
+        except Exception as exc:
+            errors.append(str(exc))
+    raise ValueError(f"Unable to parse Excel file: {' | '.join(errors)}")
+
+
+def read_tabular_dataframe(file_bytes, filename=None):
+    if file_bytes is None:
+        return None
+
+    extension = _file_extension(filename)
+    prefer_excel = extension in EXCEL_EXTENSIONS or _looks_like_excel(file_bytes)
+    parse_errors = []
+
+    if prefer_excel:
+        try:
+            return _read_excel_dataframe(file_bytes)
+        except Exception as exc:
+            parse_errors.append(str(exc))
+        try:
+            return _read_csv_dataframe(file_bytes)
+        except Exception as exc:
+            parse_errors.append(str(exc))
+    else:
+        try:
+            return _read_csv_dataframe(file_bytes)
+        except Exception as exc:
+            parse_errors.append(str(exc))
+        try:
+            return _read_excel_dataframe(file_bytes)
+        except Exception as exc:
+            parse_errors.append(str(exc))
+
+    raise ValueError(f"Unable to parse uploaded file as CSV or Excel: {' | '.join(parse_errors)}")
+
+
+def normalize_uploaded_table_bytes(file_bytes, filename=None):
+    df = read_tabular_dataframe(file_bytes, filename=filename)
+    if df is None:
+        return None
+    if len(df.columns) == 0:
+        raise ValueError('Uploaded file has no columns.')
+    return df.to_csv(index=False).encode('utf-8')
+
+
+def load_and_prepare_data(file_bytes, value_column, segment_column=None):
     """
     Loads and cleans the base data for a given trend.
     This function reads a CSV, renames the primary value column,
     handles missing or non-numeric values, and prepares the data
     for both overall and segmented analysis.
     """
-    try:
-        if csv_bytes is None:
-            return None, {}
-        df = pd.read_csv(BytesIO(csv_bytes))
-    except FileNotFoundError:
+    if file_bytes is None:
         return None, {}
+    df = read_tabular_dataframe(file_bytes)
 
     def canonical(col_name):
-        return str(col_name).strip().lower().replace(' ', '_')
+        # Strip UTF-8 BOM/zero-width marks that often appear in CSV headers.
+        cleaned = str(col_name).replace('\ufeff', '').replace('\u200b', '')
+        return cleaned.strip().lower().replace(' ', '_')
 
     raw_columns = list(df.columns)
     canonical_lookup = {canonical(col): col for col in raw_columns}
@@ -622,6 +774,16 @@ def build_data_missing_message(trend_key):
 def contextualize_error_message(trend_key, error_message):
     if error_message == 'Data file not found':
         return build_data_missing_message(trend_key)
+    if (
+        storage_backend == STORAGE_VERCEL_BLOB
+        and isinstance(error_message, str)
+        and 'HTTP Error 503' in error_message
+    ):
+        return (
+            f"Storage is temporarily unavailable. "
+            f"trend={trend_key} backend={storage_backend} "
+            "Please retry the request."
+        )
     return error_message
 
 
@@ -1041,14 +1203,21 @@ def api_upload():
         if not uploaded_file:
             return jsonify({'error': 'No file provided'}), 400
 
-        file_bytes = uploaded_file.read()
-        if not file_bytes:
+        raw_file_bytes = uploaded_file.read()
+        if not raw_file_bytes:
             return jsonify({'error': 'Uploaded file is empty'}), 400
 
-        storage_adapter.write_trend_csv(trend_key, file_bytes)
+        normalized_file_bytes = normalize_uploaded_table_bytes(
+            raw_file_bytes,
+            filename=getattr(uploaded_file, 'filename', ''),
+        )
+        if not normalized_file_bytes:
+            return jsonify({'error': 'Uploaded file is empty'}), 400
+
+        storage_adapter.write_trend_csv(trend_key, normalized_file_bytes)
         observability = get_storage_observability(trend_key)
         observability['last_upload_at'] = utc_now_iso()
-        observability['last_upload_bytes'] = len(file_bytes)
+        observability['last_upload_bytes'] = len(normalized_file_bytes)
         observability['last_error'] = None
 
         refresh_trend_data(trend_key)
@@ -1083,6 +1252,16 @@ def api_upload():
         get_selected_segment_key(trend_key)
 
         return jsonify({'message': f"{config['label']} data updated successfully"}), 200
+    except urllib_error.HTTPError as exc:
+        if exc.code >= 500:
+            return jsonify({
+                'error': (
+                    f"Storage is temporarily unavailable. "
+                    f"trend={trend_key} backend={storage_backend} "
+                    f"status={exc.code}. Please retry."
+                )
+            }), 503
+        return jsonify({'error': str(exc)}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 

@@ -21,10 +21,10 @@ Set these in Vercel Project Settings -> Environment Variables:
 - `FLASK_SECRET_KEY`: random secret for Flask sessions.
 - `STORAGE_BACKEND=vercel_blob`
 - `BLOB_READ_WRITE_TOKEN`: Vercel Blob read/write token.
+- `VERCEL_BLOB_BASE_URL`: your Blob store host URL (required in production).
 
 Optional:
 
-- `VERCEL_BLOB_BASE_URL` (default: `https://blob.vercel-storage.com`)
 - `VERCEL_BLOB_PATH_PREFIX` (for namespacing blob paths)
 
 ## 4. Shared data keys
@@ -76,6 +76,7 @@ Use this after any env var or deployment change:
 2. Confirm production env vars include only the required Blob contract:
    - `STORAGE_BACKEND=vercel_blob`
    - `BLOB_READ_WRITE_TOKEN`
+   - `VERCEL_BLOB_BASE_URL`
    - `FLASK_SECRET_KEY`
 3. Upload one CSV for each trend (`collection`, `releases`).
 4. Check:
